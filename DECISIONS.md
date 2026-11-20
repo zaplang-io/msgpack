@@ -70,7 +70,7 @@ decoder raises `ExtraData` when a complete value is followed by more bytes,
 `FormatError` for invalid or unsupported formats, and `StackError` for
 nesting beyond 1,024 levels. It verifies that declared lengths can fit in
 the remaining input before slicing payloads or allocating collections.
-Configurable per-type limits are tracked in issue #7.
+Issue #7 adds configurable per-type limits to both readers.
 [msgpack-python decode errors](https://msgpack-python.readthedocs.io/en/latest/api.html#msgpack.unpackb)
 
 ## Feed-based streaming (issue #4)
@@ -114,6 +114,26 @@ of the host. The `DateTime` helper uses the Python year range 1 through 9999.
 `Timestamp` itself covers all signed 64-bit seconds.
 [msgpack-python `Timestamp`](https://msgpack-python.readthedocs.io/en/latest/api.html#msgpack.Timestamp), [Zap subsecond DateTime](https://github.com/zaplang-io/zap/issues/1148), [Zap timezone handling](https://github.com/zaplang-io/zap/issues/1149)
 
+## Decode limits (issue #7)
+
+Both readers use the `max_str_len`, `max_bin_len`, `max_array_len`,
+`max_map_len`, and `max_ext_len` keyword names from msgpack-python. A setting
+of `-1` leaves the length bounded by the available input or the streaming
+buffer budget. An explicit nonnegative cap applies to the declared wire
+length before any payload or collection is materialized. This means a string
+decoded with `raw=True` is subject to the string cap, and a timestamp is
+subject to the extension payload cap. Every map pair counts toward its cap.
+
+Each length cap has a distinct exception. A complete over-limit header raises
+its limit error even if its body has yet to arrive. A short header or a body
+that fits the configured limits can still raise `OutOfData`. A streaming
+limit error leaves the offending input in place.
+
+`max_depth` is configurable from 0 to 1,024 and uses 1,024 by default. The
+root is at depth zero, with children, map keys, and map values counted one
+level deeper. Nesting beyond the configured depth raises `StackError`.
+[msgpack-python resource limits](https://msgpack-python.readthedocs.io/en/latest/api.html#msgpack.Unpacker)
+
 <!--
 Add one section per decision as issues are implemented, e.g.:
 
@@ -123,6 +143,4 @@ Add one section per decision as issues are implemented, e.g.:
 ## ExtType / ext_hook shape (issues #5/#6)
 ...the Zap representation of ExtType and the hook signatures...
 
-## Decode limits (issue #7)
-...default max depth / max length bounds for untrusted input...
 -->

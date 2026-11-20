@@ -255,6 +255,59 @@ struct FormatError:
 struct StackError:
     str message
 
+struct StrLimitError:
+    str message
+
+struct BinLimitError:
+    str message
+
+struct ArrayLimitError:
+    str message
+
+struct MapLimitError:
+    str message
+
+struct ExtLimitError:
+    str message
+
+value struct _DecodeLimits:
+    int64 str_len
+    int64 bin_len
+    int64 array_len
+    int64 map_len
+    int64 ext_len
+    int64 depth
+
+    def validate(self):
+        if self.str_len < -1 or self.bin_len < -1 or self.array_len < -1 or self.map_len < -1 or self.ext_len < -1:
+            raise ValueError("MessagePack length limits must be -1 or nonnegative")
+        if self.depth < 0 or self.depth > 1024:
+            raise ValueError("MessagePack max_depth must be in 0..1024")
+
+    def check_str(self, int64 length):
+        if self.str_len >= 0 and length > self.str_len:
+            raise StrLimitError("MessagePack string exceeds max_str_len")
+
+    def check_bin(self, int64 length):
+        if self.bin_len >= 0 and length > self.bin_len:
+            raise BinLimitError("MessagePack binary exceeds max_bin_len")
+
+    def check_array(self, int64 length):
+        if self.array_len >= 0 and length > self.array_len:
+            raise ArrayLimitError("MessagePack array exceeds max_array_len")
+
+    def check_map(self, int64 length):
+        if self.map_len >= 0 and length > self.map_len:
+            raise MapLimitError("MessagePack map exceeds max_map_len")
+
+    def check_ext(self, int64 length):
+        if self.ext_len >= 0 and length > self.ext_len:
+            raise ExtLimitError("MessagePack extension exceeds max_ext_len")
+
+    def check_depth(self, int64 level):
+        if level > self.depth:
+            raise StackError("MessagePack recursion limit exceeded")
+
 def _decoded_unsigned(uint64 word) -> Value:
     if word <= uint64(9223372036854775807):
         return Value.Int(int64(word))
@@ -320,6 +373,7 @@ struct _Decoder:
     int64 pos
     bool raw
     bool strict_map_key
+    _DecodeLimits limits
 
     def _require(self, int64 count):
         if count > len(self.data) - self.pos:
@@ -341,6 +395,7 @@ struct _Decoder:
         return self.data[start:self.pos]
 
     def _text(self, int64 length) -> Value:
+        self.limits.check_str(length)
         auto payload = self._payload(length)
         if self.raw:
             return Value.Bin(payload)
@@ -351,7 +406,12 @@ struct _Decoder:
             raise FormatError("MessagePack string is not valid UTF-8")
         return Value.Str(text)
 
+    def _binary(self, int64 length) -> Value:
+        self.limits.check_bin(length)
+        return Value.Bin(self._payload(length))
+
     def _extension(self, int64 length) -> Value:
+        self.limits.check_ext(length)
         self._require(length + 1)
         auto code = int64(self._word(1))
         if code == 255:
@@ -379,6 +439,7 @@ struct _Decoder:
         return Value.Timestamp(Timestamp(seconds, uint32(nanos)))
 
     def _array(self, int64 length, int64 depth) -> Value:
+        self.limits.check_array(length)
         # Each item needs a tag byte. Check before allocating the output list.
         self._require(length)
         list[Value] items = []
@@ -389,6 +450,7 @@ struct _Decoder:
         return Value.Array(items)
 
     def _map(self, int64 length, int64 depth) -> Value:
+        self.limits.check_map(length)
         # Each pair needs two tags. Wire lengths are at most 2^32 - 1.
         self._require(2 * length)
         list[(Value, Value)] pairs = []
@@ -403,8 +465,7 @@ struct _Decoder:
         return Value.Map(pairs)
 
     def _value(self, int64 depth) -> Value:
-        if depth > 1024:
-            raise StackError("MessagePack recursion limit exceeded")
+        self.limits.check_depth(depth)
         auto tag = int64(self._word(1))
         if tag <= 0x7f:
             return Value.Int(tag)
@@ -423,7 +484,7 @@ struct _Decoder:
         if tag == 0xc3:
             return Value.Bool(True)
         if tag >= 0xc4 and tag <= 0xc6:
-            return Value.Bin(self._payload(int64(self._word(_length_width(tag)))))
+            return self._binary(int64(self._word(_length_width(tag))))
         if tag >= 0xc7 and tag <= 0xc9:
             return self._extension(int64(self._word(_length_width(tag))))
         if tag == 0xca:
@@ -445,22 +506,37 @@ struct _Decoder:
             return self._map(int64(self._word(_length_width(tag))), depth)
         raise FormatError("Reserved MessagePack tag 0xc1")
 
-def unpackb(bytes data, bool raw = False, bool strict_map_key = True) -> Value:
+def _unpackb(bytes data, bool raw, bool strict_map_key, _DecodeLimits limits) -> Value:
+    auto decoder = _Decoder(data, 0, raw, strict_map_key, limits)
+    auto value = decoder._value(0)
+    if decoder.pos != len(data):
+        raise ExtraData("Trailing data after MessagePack value at byte " + str(decoder.pos))
+    return value
+
+def unpackb(
+    bytes data,
+    bool raw = False,
+    bool strict_map_key = True,
+    int64 max_str_len = -1,
+    int64 max_bin_len = -1,
+    int64 max_array_len = -1,
+    int64 max_map_len = -1,
+    int64 max_ext_len = -1,
+    int64 max_depth = 1024,
+) -> Value:
     """Decode exactly one MessagePack value.
 
     Set raw=True to decode string payloads as bytes. Map keys must be strings
     or binary values unless strict_map_key=False is set. Maps preserve pair
     order and duplicates.
 
-    Raises OutOfData for incomplete input, ExtraData for trailing bytes,
-    FormatError for invalid or unsupported values, and StackError for nesting
-    beyond 1,024 levels.
+    Length limits default to -1 and the input still bounds available bytes.
+    Set max_depth to 0..1024, counting the root as depth zero. Length and
+    nesting violations raise their typed limit errors before reading bodies.
     """
-    auto decoder = _Decoder(data, 0, raw, strict_map_key)
-    auto value = decoder._value(0)
-    if decoder.pos != len(data):
-        raise ExtraData("Trailing data after MessagePack value at byte " + str(decoder.pos))
-    return value
+    auto limits = _DecodeLimits(max_str_len, max_bin_len, max_array_len, max_map_len, max_ext_len, max_depth)
+    limits.validate()
+    return _unpackb(data, raw, strict_map_key, limits)
 
 def unpackb_with_ext_hook[T](bytes data, fn(int64, bytes) -> T ext_hook) -> T:
     """Decode one complete application extension and return the typed hook result."""
@@ -487,6 +563,12 @@ struct Unpacker:
     bool raw = False
     bool strict_map_key = True
     int64 max_buffer_size = 104857600
+    int64 max_str_len = -1
+    int64 max_bin_len = -1
+    int64 max_array_len = -1
+    int64 max_map_len = -1
+    int64 max_ext_len = -1
+    int64 max_depth = 1024
     list[bytes] _chunks = []
     int64 _count = 0
     int64 _head_offset = 0
@@ -558,29 +640,49 @@ struct Unpacker:
             return self._done()
         return False
 
-    def _step(self, int64 octet) -> bool:
+    def _framed_length(self, int64 tag, int64 length, _DecodeLimits limits) -> bool:
+        if tag == 0xdc or tag == 0xdd:
+            limits.check_array(length)
+            return self._container(length)
+        if tag == 0xde or tag == 0xdf:
+            limits.check_map(length)
+            return self._container(2 * length)
+        if tag >= 0xc7 and tag <= 0xc9:
+            limits.check_ext(length)
+            return self._skip_payload(length + 1)
+        if tag >= 0xc4 and tag <= 0xc6:
+            limits.check_bin(length)
+        else:
+            limits.check_str(length)
+        return self._skip_payload(length)
+
+    def _step(self, int64 octet, _DecodeLimits limits) -> bool:
         if self._header_left > 0:
-            self._length = self._length * 256 + octet
-            self._header_left = self._header_left - 1
-            if self._header_left > 0:
+            auto length = self._length * 256 + octet
+            if self._header_left > 1:
+                self._length = length
+                self._header_left = self._header_left - 1
                 return False
-            if self._header_tag == 0xdc or self._header_tag == 0xdd:
-                return self._container(self._length)
-            if self._header_tag == 0xde or self._header_tag == 0xdf:
-                return self._container(2 * self._length)
-            if self._header_tag >= 0xc7 and self._header_tag <= 0xc9:
-                return self._skip_payload(self._length + 1)
-            return self._skip_payload(self._length)
-        if self._depth > 1024:
-            raise StackError("MessagePack recursion limit exceeded")
+            # Commit only after checking the declared length. A failed read
+            # must leave the last length byte and the parser state intact.
+            auto ready = self._framed_length(self._header_tag, length, limits)
+            self._header_left = 0
+            return ready
+        limits.check_depth(self._depth)
         if octet <= 0x7f or octet >= 0xe0 or octet == 0xc0 or octet == 0xc2 or octet == 0xc3:
             return self._done()
         if octet <= 0x8f:
-            return self._container(2 * (octet - 0x80))
+            auto length = octet - 0x80
+            limits.check_map(length)
+            return self._container(2 * length)
         if octet <= 0x9f:
-            return self._container(octet - 0x90)
+            auto length = octet - 0x90
+            limits.check_array(length)
+            return self._container(length)
         if octet <= 0xbf:
-            return self._skip_payload(octet - 0xa0)
+            auto length = octet - 0xa0
+            limits.check_str(length)
+            return self._skip_payload(length)
         if octet == 0xca:
             return self._skip_payload(4)
         if octet == 0xcb:
@@ -588,7 +690,9 @@ struct Unpacker:
         if octet >= 0xcc and octet <= 0xd3:
             return self._skip_payload(_integer_width(octet))
         if octet >= 0xd4 and octet <= 0xd8:
-            return self._skip_payload(_fixed_extension_length(octet) + 1)
+            auto length = _fixed_extension_length(octet)
+            limits.check_ext(length)
+            return self._skip_payload(length + 1)
         auto width = _length_width(octet)
         if width > 0:
             self._header_left = width
@@ -597,7 +701,7 @@ struct Unpacker:
             return False
         raise FormatError("Reserved MessagePack tag 0xc1")
 
-    def _scan(self):
+    def _scan(self, _DecodeLimits limits):
         # Keep the parser state and logical offset across calls. A feed may
         # merge physical chunks, so locate the saved offset before resuming.
         auto offset = self._head_offset + self._scanned
@@ -617,13 +721,13 @@ struct Unpacker:
                         if self._payload_left == 0:
                             self._ready = self._done()
                     else:
-                        self._ready = self._step(chunk[offset])
+                        self._ready = self._step(chunk[offset], limits)
                     offset = offset + count
                     self._scanned = self._scanned + count
                 offset = 0
             index = index + 1
 
-    def _read_frame(self) -> Value:
+    def _read_frame(self, _DecodeLimits limits) -> Value:
         list[bytes] parts = []
         auto left = self._scanned
         auto offset = self._head_offset
@@ -644,7 +748,7 @@ struct Unpacker:
                 first = first + 1
                 offset = 0
         auto frame = _join_bytes(parts, 0, len(parts))
-        auto value = unpackb(frame, raw=self.raw, strict_map_key=self.strict_map_key)
+        auto value = _unpackb(frame, self.raw, self.strict_map_key, limits)
         # Advance only after validation so a data error cannot discard input.
         auto index = 0
         while index < self._count - first:
@@ -663,10 +767,12 @@ struct Unpacker:
 
     def unpack(self) -> Value:
         """Return the next value, or raise OutOfData until more bytes arrive."""
-        self._scan()
+        auto limits = _DecodeLimits(self.max_str_len, self.max_bin_len, self.max_array_len, self.max_map_len, self.max_ext_len, self.max_depth)
+        limits.validate()
+        self._scan(limits)
         if not self._ready:
             raise OutOfData("Incomplete MessagePack stream value")
-        return self._read_frame()
+        return self._read_frame(limits)
 
     def __iter__(self) -> Unpacker:
         """Return this single-pass iterator over the unread values."""
