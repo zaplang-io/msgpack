@@ -67,6 +67,23 @@ def _length_header(int64 length, int64 fix_tag, int64 fix_max, int64 tag8, int64
         return _tagged_word(tag32, uint64(length), 4)
     raise ValueError("MessagePack length exceeds 32 bits")
 
+def _extension_header(ExtType extension) -> bytes:
+    auto code = extension.code
+    if code < 0 or code > 127:
+        raise ValueError("MessagePack application extension code must be in 0..127")
+    auto length = len(extension.data)
+    if length == 1:
+        return bytes([0xd4, code])
+    if length == 2:
+        return bytes([0xd5, code])
+    if length == 4:
+        return bytes([0xd6, code])
+    if length == 8:
+        return bytes([0xd7, code])
+    if length == 16:
+        return bytes([0xd8, code])
+    return _length_header(length, 0, -1, 0xc7, 0xc8, 0xc9) + bytes([code])
+
 def _float_bits(float64 value, int64 bias, int64 fraction_bits, float64 fraction_scale) -> uint64:
     auto infinity = uint64(2 * bias + 1) << uint64(fraction_bits)
     if math.isnan(value):
@@ -152,7 +169,8 @@ def _pack(Value value, bool use_single_float, int64 depth, list[bytes] parts):
                 _pack(pair[0], use_single_float, depth + 1, parts)
                 _pack(pair[1], use_single_float, depth + 1, parts)
         case Value.Ext(extension):
-            raise ValueError("MessagePack application extensions are not supported yet")
+            parts.append(_extension_header(extension))
+            parts.append(extension.data)
         case Value.Timestamp(timestamp):
             raise ValueError("MessagePack timestamps are not supported yet")
 
@@ -164,11 +182,11 @@ def _join_bytes(list[bytes] parts, int64 start, int64 stop) -> bytes:
     return _join_bytes(parts, start, middle) + _join_bytes(parts, middle, stop)
 
 def packb(Value value, bool use_single_float = False) -> bytes:
-    """Serialize one base MessagePack value to bytes.
+    """Serialize a MessagePack value to bytes.
 
     Floats use binary64 by default. Set use_single_float=True for binary32.
-    Raises ValueError for extensions, oversized lengths, or nesting beyond
-    1,024 levels.
+    Raises ValueError for invalid extension codes, timestamps, oversized
+    lengths, or nesting beyond 1,024 levels.
     """
     list[bytes] parts = []
     _pack(value, use_single_float, 0, parts)
@@ -210,16 +228,16 @@ def _integer_width(int64 tag) -> int64:
 def _length_width(int64 tag) -> int64:
     if tag >= 0xc4 and tag <= 0xc6:
         return 1 << (tag - 0xc4)
+    if tag >= 0xc7 and tag <= 0xc9:
+        return 1 << (tag - 0xc7)
     if tag >= 0xd9 and tag <= 0xdb:
         return 1 << (tag - 0xd9)
     if tag >= 0xdc and tag <= 0xdf:
         return 2 << ((tag - 0xdc) & 1)
     return 0
 
-def _invalid_tag_message(int64 tag) -> str:
-    if tag == 0xc1:
-        return "Reserved MessagePack tag 0xc1"
-    return "MessagePack extensions are not supported yet"
+def _fixed_extension_length(int64 tag) -> int64:
+    return 1 << (tag - 0xd4)
 
 def _decoded_float(uint64 word, int64 bias, int64 fraction_bits, float64 fraction_scale) -> float64:
     auto fraction_mask = (uint64(1) << uint64(fraction_bits)) - uint64(1)
@@ -286,6 +304,15 @@ struct _Decoder:
             raise FormatError("MessagePack string is not valid UTF-8")
         return Value.Str(text)
 
+    def _extension(self, int64 length) -> Value:
+        self._require(length + 1)
+        auto code = int64(self._word(1))
+        if code == 255:
+            raise FormatError("MessagePack timestamps are not supported yet")
+        if code >= 128:
+            raise FormatError("Reserved MessagePack extension code " + str(code - 256))
+        return Value.Ext(ExtType(code, self._payload(length)))
+
     def _array(self, int64 length, int64 depth) -> Value:
         # Each item needs a tag byte. Check before allocating the output list.
         self._require(length)
@@ -332,6 +359,8 @@ struct _Decoder:
             return Value.Bool(True)
         if tag >= 0xc4 and tag <= 0xc6:
             return Value.Bin(self._payload(int64(self._word(_length_width(tag)))))
+        if tag >= 0xc7 and tag <= 0xc9:
+            return self._extension(int64(self._word(_length_width(tag))))
         if tag == 0xca:
             return Value.Float(_decoded_float(self._word(4), 127, 23, 8388608.0))
         if tag == 0xcb:
@@ -341,16 +370,18 @@ struct _Decoder:
         if tag >= 0xd0 and tag <= 0xd3:
             auto width = _integer_width(tag)
             return Value.Int(_decoded_signed(self._word(width), width))
+        if tag >= 0xd4 and tag <= 0xd8:
+            return self._extension(_fixed_extension_length(tag))
         if tag >= 0xd9 and tag <= 0xdb:
             return self._text(int64(self._word(_length_width(tag))))
         if tag == 0xdc or tag == 0xdd:
             return self._array(int64(self._word(_length_width(tag))), depth)
         if tag == 0xde or tag == 0xdf:
             return self._map(int64(self._word(_length_width(tag))), depth)
-        raise FormatError(_invalid_tag_message(tag))
+        raise FormatError("Reserved MessagePack tag 0xc1")
 
 def unpackb(bytes data, bool raw = False, bool strict_map_key = True) -> Value:
-    """Decode exactly one base MessagePack value.
+    """Decode exactly one MessagePack value.
 
     Set raw=True to decode string payloads as bytes. Map keys must be strings
     or binary values unless strict_map_key=False is set. Maps preserve pair
@@ -464,6 +495,8 @@ struct Unpacker:
                 return self._container(self._length)
             if self._header_tag == 0xde or self._header_tag == 0xdf:
                 return self._container(2 * self._length)
+            if self._header_tag >= 0xc7 and self._header_tag <= 0xc9:
+                return self._skip_payload(self._length + 1)
             return self._skip_payload(self._length)
         if self._depth > 1024:
             raise StackError("MessagePack recursion limit exceeded")
@@ -481,13 +514,15 @@ struct Unpacker:
             return self._skip_payload(8)
         if octet >= 0xcc and octet <= 0xd3:
             return self._skip_payload(_integer_width(octet))
+        if octet >= 0xd4 and octet <= 0xd8:
+            return self._skip_payload(_fixed_extension_length(octet) + 1)
         auto width = _length_width(octet)
         if width > 0:
             self._header_left = width
             self._header_tag = octet
             self._length = 0
             return False
-        raise FormatError(_invalid_tag_message(octet))
+        raise FormatError("Reserved MessagePack tag 0xc1")
 
     def _scan(self):
         # Keep the parser state and logical offset across calls. A feed may

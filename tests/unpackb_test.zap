@@ -108,7 +108,7 @@ def malformed():
     fails(bytes([0x91, 0xc1]), "format", "reserved tag inside array")
     fails(bytes([0x81, 0xa1, 0x6b, 0xc1]), "format", "reserved tag inside map")
     for tag in [0xc7, 0xc8, 0xc9, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8]:
-        fails(bytes([tag]), "format", "unsupported extension tag")
+        fails(bytes([tag]), "incomplete", "extension tag needs code and payload")
 
     for wire in [bytes([0xa1, 0xff]), bytes([0xa1, 0xc3]), bytes([0xa2, 0xc0, 0x80]), bytes([0xa3, 0xed, 0xa0, 0x80])]:
         fails(wire, "format", "malformed UTF-8 string")
