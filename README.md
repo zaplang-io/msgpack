@@ -51,6 +51,8 @@ def main():
 
 Wrap `msgpack.ExtType(code, data)` in `msgpack.Value.Ext` to encode an application-defined extension. The code is an integer from 0 through 127 and the payload is `bytes`. Encoding uses `fixext` for 1, 2, 4, 8, or 16 payload bytes and the smallest variable-length extension header otherwise. The decoder returns `Value.Ext` with the original code and bytes, including inside arrays and maps. `raw` applies to text fields and leaves extension payloads as bytes.
 
+For a top-level custom object, `packb_with_default(value, default=encode)` calls your `encode` function to produce an `ExtType`. `unpackb_with_ext_hook(data, ext_hook=decode)` validates one complete application extension, then calls your `decode(code, payload)` function and returns its declared type.
+
 ## Streaming
 
 Use `Packer().pack(value)` to encode each value for immediate writing to a stream. `Packer(use_single_float=True)` applies the same float setting to each call. Feed incoming chunks to `Unpacker` and iterate whenever more bytes arrive.

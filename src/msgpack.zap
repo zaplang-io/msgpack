@@ -192,6 +192,11 @@ def packb(Value value, bool use_single_float = False) -> bytes:
     _pack(value, use_single_float, 0, parts)
     return _join_bytes(parts, 0, len(parts))
 
+def packb_with_default[T](T value, fn(T) -> ExtType default) -> bytes:
+    """Convert one custom value to an application extension and encode it."""
+    auto extension = default(value)
+    return packb(Value.Ext(extension))
+
 # Raised when the input ends before a complete value is available.
 struct OutOfData:
     str message
@@ -396,6 +401,14 @@ def unpackb(bytes data, bool raw = False, bool strict_map_key = True) -> Value:
     if decoder.pos != len(data):
         raise ExtraData("Trailing data after MessagePack value at byte " + str(decoder.pos))
     return value
+
+def unpackb_with_ext_hook[T](bytes data, fn(int64, bytes) -> T ext_hook) -> T:
+    """Decode one complete application extension and return the typed hook result."""
+    match unpackb(data):
+        case Value.Ext(extension):
+            return ext_hook(extension.code, extension.data)
+        case _:
+            raise FormatError("Expected a top-level MessagePack application extension")
 
 # Incremental encoding with the same float policy for each value in a stream.
 struct Packer:

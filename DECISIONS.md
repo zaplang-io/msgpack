@@ -89,6 +89,17 @@ value to `unpackb`, which keeps text and key validation consistent with one-shot
 decoding. An invalid frame remains at the front of the stream.
 [msgpack-python streaming API](https://msgpack-python.readthedocs.io/en/latest/api.html#msgpack.Unpacker)
 
+## Typed application extension hooks (issue #5)
+
+Python's `default` and `ext_hook` can accept or return arbitrary objects.
+Zap uses typed top-level helpers so the core APIs can retain `Value` for
+heterogeneous documents. `packb_with_default[T]` invokes `default(T) -> ExtType`
+once and encodes that extension. `unpackb_with_ext_hook[T]` invokes
+`ext_hook(int64, bytes) -> T` only after validating exactly one top-level
+application extension. Nested extensions remain `Value.Ext` for the caller to
+interpret. Callback exceptions propagate to the caller.
+[msgpack-python hooks](https://msgpack-python.readthedocs.io/en/latest/api.html)
+
 <!--
 Add one section per decision as issues are implemented, e.g.:
 

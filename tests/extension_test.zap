@@ -108,8 +108,75 @@ def errors_and_nesting():
     wire_fail(ext_key, "strict_map_key")
     check(msgpack.packb(msgpack.unpackb(ext_key, strict_map_key=False)) == ext_key, "nonstrict mode accepts extension keys")
 
+struct Record:
+    bytes payload
+    int64 encode_calls
+
+def encode_record(Record value) -> msgpack.ExtType:
+    value.encode_calls = value.encode_calls + 1
+    return msgpack.ExtType(42, value.payload)
+
+def decode_record(int64 code, bytes payload) -> Record:
+    if code != 42:
+        raise ValueError("Record decoder received an unexpected code")
+    return Record(payload, 0)
+
+def refused_record(Record value) -> msgpack.ExtType:
+    raise ValueError("Record encoder refused the input")
+
+def reserved_code(Record value) -> msgpack.ExtType:
+    return msgpack.ExtType(-1, value.payload)
+
+def reject_without_hook(bytes wire, str expected):
+    auto caught = ""
+    try:
+        msgpack.unpackb_with_ext_hook(wire, ext_hook=decode_record)
+    except msgpack.OutOfData:
+        caught = "incomplete"
+    except msgpack.ExtraData:
+        caught = "trailing"
+    except msgpack.FormatError as message:
+        caught = message
+    check(caught.find(expected) >= 0, "typed helper validates wire before invoking hook")
+
+def hook_failures(Record record):
+    auto called = False
+    try:
+        msgpack.packb_with_default(record, default=refused_record)
+    except ValueError as message:
+        called = message.find("encoder refused") >= 0
+    check(called, "default hook error propagates")
+    auto bad_code = False
+    try:
+        msgpack.packb_with_default(record, default=reserved_code)
+    except ValueError as message:
+        bad_code = message.find("0..127") >= 0
+    check(bad_code, "default hook result must use a valid application code")
+    auto rejected = False
+    try:
+        msgpack.unpackb_with_ext_hook(bytes([0xd4, 41, 0]), ext_hook=decode_record)
+    except ValueError as message:
+        rejected = message.find("unexpected code") >= 0
+    check(rejected, "ext_hook error propagates")
+
+def typed_hooks():
+    auto record = Record(bytes([0, 0x80, 0xff]), 0)
+    auto wire = msgpack.packb_with_default(record, default=encode_record)
+    check(wire == bytes([0xc7, 3, 42, 0, 0x80, 0xff]), "default transforms one typed record into extension bytes")
+    check(record.encode_calls == 1, "default called exactly once")
+    Record decoded = msgpack.unpackb_with_ext_hook(wire, ext_hook=decode_record)
+    check(decoded.payload == record.payload, "ext_hook returns the user record type")
+    # Code 41 would raise from decode_record if it were called before validation.
+    reject_without_hook(bytes([0xd4, 41]), "incomplete")
+    reject_without_hook(bytes([0xd4, 41, 0, 0xc0]), "trailing")
+    reject_without_hook(bytes([0xd4, 0xfe, 0]), "extension code -2")
+    reject_without_hook(bytes([0xc0]), "top-level")
+    reject_without_hook(bytes([0x91, 0xd4, 41, 0]), "top-level")
+    hook_failures(record)
+
 def main():
     widths()
     prefix_cases()
     errors_and_nesting()
-    print("MessagePack extension wire and rejection tests: PASS")
+    typed_hooks()
+    print("MessagePack extension wire, hooks, and rejection tests: PASS")
