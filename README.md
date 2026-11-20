@@ -26,6 +26,8 @@ def main():
 
 `packb` chooses the shortest integer and collection or payload length headers. `Str` encodes UTF-8 and `Bin` keeps the original bytes. Maps retain the order and duplicates in their pair lists. Float payloads default to binary64, and `use_single_float=True` selects binary32 throughout the document. NaNs encode as a canonical quiet NaN. The encoder raises `ValueError` for invalid extension codes or timestamp nanoseconds, lengths outside the wire limit, and nesting beyond 1,024 levels.
 
+`use_bin_type=False` selects legacy MessagePack raw headers for both strings and binary values. On decode, use `raw=True` to recover arbitrary bytes from these headers. The default reader interprets them as UTF-8 strings.
+
 ## Decoding
 
 `unpackb(data, raw=False, strict_map_key=True)` decodes one complete value. `raw=True` returns string payloads as bytes, including string keys. Disable `strict_map_key` to allow other value types as map keys. Maps preserve input order and repeated keys in both modes.
@@ -111,13 +113,29 @@ def main():
 
 `max_buffer_size` defaults to 100 MiB of unread data. Set it to a positive byte limit for your stream or to zero for the MessagePack-scale limit of `2^32 - 1` bytes. A feed that would exceed the limit raises `BufferFull` before accepting any bytes. Successful reads release capacity.
 
+## msgpack-python options
+
+| Option | Zap API and default | Behavior |
+| --- | --- | --- |
+| `use_bin_type` | `packb` and `Packer`, `True` | Binary uses the bin family and text can use `str8`. `False` uses legacy raw headers for both and skips `str8`. |
+| `use_single_float` | `packb` and `Packer`, `False` | `True` selects binary32 in place of the binary64 default. |
+| `raw` | `unpackb` and `Unpacker`, `False` | `True` returns string payloads as `Value.Bin`, including map keys. |
+| `strict_map_key` | `unpackb` and `Unpacker`, `True` | Requires string or binary keys. `False` permits arbitrary `Value` keys. |
+| `max_str_len`, `max_bin_len`, `max_array_len`, `max_map_len`, `max_ext_len` | Both readers, `-1` | See [decode limits](#decode-limits) for units and typed errors. |
+| `max_buffer_size` | `Unpacker`, 100 MiB | Caps unread stream bytes. |
+| `datetime` and `timestamp` | Explicit `timestamp_from_datetime` and `Timestamp.to_datetime()` | The codec defaults to `Value.Timestamp` (`timestamp=0` in Python). The helpers convert an aware `DateTime` to a timestamp and convert a timestamp to UTC. |
+| `default` and `ext_hook` | Typed `packb_with_default[T]` and `unpackb_with_ext_hook[T]` | Optional top-level conversion through application extensions. The ordinary encoder accepts `Value` and the ordinary decoder returns `Value.Ext` for application extensions. |
+| `object_hook` and `object_pairs_hook` | Explicit conversion from `Value.Map(pairs)` | Match the map variant and convert its ordered pairs to your application type. Every duplicate key is available to the caller. |
+
+See [option decisions](DECISIONS.md#msgpack-python-option-parity-issue-8) for the Python options that have a different shape or are outside the Zap API.
+
 ## Scope
 
 - Core `packb`/`unpackb` for all MessagePack base types (#2/#3).
 - Streaming `Packer`/`Unpacker` with incremental `feed` (#4).
 - Extension types (`ExtType`) + `default`/`ext_hook` (#5), and the Timestamp extension (ext -1) (#6).
 - Configurable decode limits and a deterministic malformed-input corpus (#7).
-- Option parity: `use_bin_type`, `raw`, `strict_map_key`, … (#8).
+- Modern and legacy binary encoding plus the msgpack-python option mapping (#8).
 - The approved `Value` model represents maps as ordered key/value pairs and preserves duplicate keys. By default, decoding accepts string and binary keys. [Value-model decision](DECISIONS.md#dynamic-document-value-model-issue-10)
 
 ## Build and test
