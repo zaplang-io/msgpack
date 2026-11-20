@@ -16,9 +16,12 @@ A pure-Zap MessagePack codec whose public API mirrors [**msgpack-python**](https
 ## Usage (target surface)
 
 ```zap
-# Sketch — see the epic for what is implemented today.
-data = msgpack.packb({"id": 1, "tags": [b"a", b"b"]})   # bytes
-obj  = msgpack.unpackb(data)                              # dynamic value
+import msgpack
+
+# Proposed usage once the codec is implemented.
+auto value = msgpack.Value.Map([(msgpack.Value.Str("id"), msgpack.Value.Int(1))])
+auto data = msgpack.packb(value)
+auto obj = msgpack.unpackb(data)
 
 # Streaming:
 unpacker = msgpack.Unpacker()
@@ -34,7 +37,7 @@ for item in unpacker:
 - Extension types (`ExtType`) + `default`/`ext_hook` (#5), and the Timestamp extension (ext -1) (#6).
 - Decode limits + malformed-input hardening — untrusted input is a first-class concern (#7).
 - Option parity: `use_bin_type`, `raw`, `strict_map_key`, … (#8).
-- The dynamic document value model is an open design decision (#10 — see DECISIONS.md).
+- The approved `Value` model represents maps as ordered key/value pairs and preserves duplicate keys. By default, decoding accepts string and binary keys. [Value-model decision](DECISIONS.md#dynamic-document-value-model-issue-10)
 
 ## Build and test
 
