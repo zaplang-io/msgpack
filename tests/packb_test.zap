@@ -152,7 +152,7 @@ def invalid():
     auto extension = msgpack.Value.Ext(msgpack.ExtType(128, b"x"))
     rejected(extension, "application extension code")
     rejected(msgpack.Value.Array([extension]), "application extension code")
-    rejected(msgpack.Value.Timestamp(msgpack.Timestamp(0, uint32(0))), "timestamps")
+    rejected(msgpack.Value.Timestamp(msgpack.Timestamp(0, uint32(1000000000))), "timestamp nanoseconds")
 
     msgpack.Value deep = msgpack.Value.Nil
     auto depth = 0
