@@ -7,6 +7,8 @@ def check(bool condition, str label):
 
 def golden(msgpack.Value value, bytes expected, str label):
     check(msgpack.packb(value) == expected, label)
+    auto decoded = msgpack.unpackb(expected, strict_map_key=False)
+    check(msgpack.packb(decoded) == expected, "round-trip " + label)
 
 def integers():
     golden(msgpack.Value.Int(0), bytes([0x00]), "int 0")
@@ -65,6 +67,8 @@ def floats():
 
 def single(float64 value, bytes expected, str label):
     check(msgpack.packb(msgpack.Value.Float(value), use_single_float=True) == expected, label)
+    auto decoded = msgpack.unpackb(expected)
+    check(msgpack.packb(decoded, use_single_float=True) == expected, "round-trip " + label)
 
 def repeat(bytes unit, int64 count) -> bytes:
     auto output = b""

@@ -173,3 +173,180 @@ def packb(Value value, bool use_single_float = False) -> bytes:
     list[bytes] parts = []
     _pack(value, use_single_float, 0, parts)
     return _join_bytes(parts, 0, len(parts))
+
+# Raised when the input ends before a complete value is available.
+struct OutOfData:
+    str message
+
+# Raised when bytes remain after the first complete value.
+struct ExtraData:
+    str message
+
+# Raised for an invalid tag, string payload, or strict map key.
+struct FormatError:
+    str message
+
+# Raised when decoding would exceed the nesting limit.
+struct StackError:
+    str message
+
+def _decoded_unsigned(uint64 word) -> Value:
+    if word <= uint64(9223372036854775807):
+        return Value.Int(int64(word))
+    return Value.UInt(word)
+
+def _decoded_signed(uint64 word, int64 width) -> int64:
+    if width == 8:
+        return int64(word)
+    auto bits = width * 8
+    auto value = int64(word)
+    if value >= 1 << (bits - 1):
+        return value - (1 << bits)
+    return value
+
+def _decoded_float(uint64 word, int64 bias, int64 fraction_bits, float64 fraction_scale) -> float64:
+    auto fraction_mask = (uint64(1) << uint64(fraction_bits)) - uint64(1)
+    auto fraction = int64(word & fraction_mask)
+    auto exponent_mask = uint64(2 * bias + 1)
+    auto exponent = int64((word >> uint64(fraction_bits)) & exponent_mask)
+    auto negative = (word & (uint64(2 * (bias + 1)) << uint64(fraction_bits))) != uint64(0)
+    auto magnitude = 0.0
+    if exponent == int64(exponent_mask):
+        if fraction != 0:
+            return math.nan
+        magnitude = math.inf
+    elif exponent == 0:
+        # The minimum normal exponent also scales subnormals and zero.
+        magnitude = (float64(fraction) / fraction_scale) * math.pow(2.0, float64(1 - bias))
+    else:
+        magnitude = (1.0 + float64(fraction) / fraction_scale) * math.pow(2.0, float64(exponent - bias))
+    if negative:
+        return -magnitude
+    return magnitude
+
+def _check_map_key(Value key):
+    match key:
+        case Value.Str(text):
+            return
+        case Value.Bin(payload):
+            return
+        case _:
+            raise FormatError("strict_map_key requires string or binary keys")
+
+struct _Decoder:
+    bytes data
+    int64 pos
+    bool raw
+    bool strict_map_key
+
+    def _require(self, int64 count):
+        if count > len(self.data) - self.pos:
+            raise OutOfData("Incomplete MessagePack value at byte " + str(self.pos))
+
+    def _word(self, int64 width) -> uint64:
+        self._require(width)
+        auto word = uint64(0)
+        auto end = self.pos + width
+        while self.pos < end:
+            word = (word << uint64(8)) | uint64(self.data[self.pos])
+            self.pos = self.pos + 1
+        return word
+
+    def _payload(self, int64 length) -> bytes:
+        self._require(length)
+        auto start = self.pos
+        self.pos = start + length
+        return self.data[start:self.pos]
+
+    def _text(self, int64 length) -> Value:
+        auto payload = self._payload(length)
+        if self.raw:
+            return Value.Bin(payload)
+        auto text = ""
+        try:
+            text = str(payload)
+        except Exception:
+            raise FormatError("MessagePack string is not valid UTF-8")
+        return Value.Str(text)
+
+    def _array(self, int64 length, int64 depth) -> Value:
+        # Each item needs a tag byte. Check before allocating the output list.
+        self._require(length)
+        list[Value] items = []
+        auto index = 0
+        while index < length:
+            items.append(self._value(depth + 1))
+            index = index + 1
+        return Value.Array(items)
+
+    def _map(self, int64 length, int64 depth) -> Value:
+        # Each pair needs two tags. Wire lengths are at most 2^32 - 1.
+        self._require(2 * length)
+        list[(Value, Value)] pairs = []
+        auto index = 0
+        while index < length:
+            auto key = self._value(depth + 1)
+            if self.strict_map_key:
+                _check_map_key(key)
+            auto value = self._value(depth + 1)
+            pairs.append((key, value))
+            index = index + 1
+        return Value.Map(pairs)
+
+    def _value(self, int64 depth) -> Value:
+        if depth > 1024:
+            raise StackError("MessagePack recursion limit exceeded")
+        auto tag = int64(self._word(1))
+        if tag <= 0x7f:
+            return Value.Int(tag)
+        if tag >= 0xe0:
+            return Value.Int(tag - 256)
+        if tag <= 0x8f:
+            return self._map(tag - 0x80, depth)
+        if tag <= 0x9f:
+            return self._array(tag - 0x90, depth)
+        if tag <= 0xbf:
+            return self._text(tag - 0xa0)
+        if tag == 0xc0:
+            return Value.Nil
+        if tag == 0xc2:
+            return Value.Bool(False)
+        if tag == 0xc3:
+            return Value.Bool(True)
+        if tag >= 0xc4 and tag <= 0xc6:
+            return Value.Bin(self._payload(int64(self._word(1 << (tag - 0xc4)))))
+        if tag == 0xca:
+            return Value.Float(_decoded_float(self._word(4), 127, 23, 8388608.0))
+        if tag == 0xcb:
+            return Value.Float(_decoded_float(self._word(8), 1023, 52, 4503599627370496.0))
+        if tag >= 0xcc and tag <= 0xcf:
+            return _decoded_unsigned(self._word(1 << (tag - 0xcc)))
+        if tag >= 0xd0 and tag <= 0xd3:
+            auto width = 1 << (tag - 0xd0)
+            return Value.Int(_decoded_signed(self._word(width), width))
+        if tag >= 0xd9 and tag <= 0xdb:
+            return self._text(int64(self._word(1 << (tag - 0xd9))))
+        if tag == 0xdc or tag == 0xdd:
+            return self._array(int64(self._word(2 << (tag - 0xdc))), depth)
+        if tag == 0xde or tag == 0xdf:
+            return self._map(int64(self._word(2 << (tag - 0xde))), depth)
+        if tag == 0xc1:
+            raise FormatError("Reserved MessagePack tag 0xc1")
+        raise FormatError("MessagePack extensions are not supported yet")
+
+def unpackb(bytes data, bool raw = False, bool strict_map_key = True) -> Value:
+    """Decode exactly one base MessagePack value.
+
+    Set raw=True to decode string payloads as bytes. Map keys must be strings
+    or binary values unless strict_map_key=False is set. Maps preserve pair
+    order and duplicates.
+
+    Raises OutOfData for incomplete input, ExtraData for trailing bytes,
+    FormatError for invalid or unsupported values, and StackError for nesting
+    beyond 1,024 levels.
+    """
+    auto decoder = _Decoder(data, 0, raw, strict_map_key)
+    auto value = decoder._value(0)
+    if decoder.pos != len(data):
+        raise ExtraData("Trailing data after MessagePack value at byte " + str(decoder.pos))
+    return value
