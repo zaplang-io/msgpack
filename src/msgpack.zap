@@ -2,7 +2,7 @@ import math
 
 # The application code and payload of a MessagePack extension.
 struct ExtType:
-    int8 code
+    int64 code
     bytes data
 
 # Signed Unix seconds and a nonnegative fractional nanosecond component.
