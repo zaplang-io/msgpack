@@ -8,7 +8,7 @@ struct ExtType:
 # Signed Unix seconds and a nonnegative fractional nanosecond component.
 struct Timestamp:
     int64 seconds
-    uint32 nanoseconds
+    uint32 nanoseconds = uint32(0)
 
 # A MessagePack document. Maps retain input order and duplicate keys.
 enum Value:
@@ -24,12 +24,15 @@ enum Value:
     Ext(ExtType value)
     Timestamp(Timestamp value)
 
-def _tagged_word(int64 tag, uint64 word, int64 width) -> bytes:
-    list[int64] octets = [tag]
+def _append_word(list[int64] octets, uint64 word, int64 width):
     auto shift = (width - 1) * 8
     while shift >= 0:
         octets.append(int64((word >> uint64(shift)) & uint64(255)))
         shift = shift - 8
+
+def _tagged_word(int64 tag, uint64 word, int64 width) -> bytes:
+    list[int64] octets = [tag]
+    _append_word(octets, word, width)
     return bytes(octets)
 
 def _unsigned(uint64 value) -> bytes:
@@ -83,6 +86,24 @@ def _extension_header(ExtType extension) -> bytes:
     if length == 16:
         return bytes([0xd8, code])
     return _length_header(length, 0, -1, 0xc7, 0xc8, 0xc9) + bytes([code])
+
+def _timestamp_wire(Timestamp timestamp) -> bytes:
+    auto seconds = timestamp.seconds
+    auto nanos = uint64(timestamp.nanoseconds)
+    if nanos > uint64(999999999):
+        raise ValueError("MessagePack timestamp nanoseconds must be in 0..999999999")
+    list[int64] octets = []
+    if seconds >= 0 and seconds <= 4294967295 and nanos == uint64(0):
+        octets = [0xd6, 0xff]
+        _append_word(octets, uint64(seconds), 4)
+    elif seconds >= 0 and seconds <= 17179869183:
+        octets = [0xd7, 0xff]
+        _append_word(octets, (nanos << uint64(34)) | uint64(seconds), 8)
+    else:
+        octets = [0xc7, 12, 0xff]
+        _append_word(octets, nanos, 4)
+        _append_word(octets, uint64(seconds), 8)
+    return bytes(octets)
 
 def _float_bits(float64 value, int64 bias, int64 fraction_bits, float64 fraction_scale) -> uint64:
     auto infinity = uint64(2 * bias + 1) << uint64(fraction_bits)
@@ -172,7 +193,7 @@ def _pack(Value value, bool use_single_float, int64 depth, list[bytes] parts):
             parts.append(_extension_header(extension))
             parts.append(extension.data)
         case Value.Timestamp(timestamp):
-            raise ValueError("MessagePack timestamps are not supported yet")
+            parts.append(_timestamp_wire(timestamp))
 
 # Join fragments without repeatedly copying an ever-growing output prefix.
 def _join_bytes(list[bytes] parts, int64 start, int64 stop) -> bytes:
@@ -185,8 +206,8 @@ def packb(Value value, bool use_single_float = False) -> bytes:
     """Serialize a MessagePack value to bytes.
 
     Floats use binary64 by default. Set use_single_float=True for binary32.
-    Raises ValueError for invalid extension codes, timestamps, oversized
-    lengths, or nesting beyond 1,024 levels.
+    Raises ValueError for invalid extension codes or timestamp nanoseconds,
+    oversized lengths, or nesting beyond 1,024 levels.
     """
     list[bytes] parts = []
     _pack(value, use_single_float, 0, parts)
@@ -313,10 +334,28 @@ struct _Decoder:
         self._require(length + 1)
         auto code = int64(self._word(1))
         if code == 255:
-            raise FormatError("MessagePack timestamps are not supported yet")
+            return self._timestamp(length)
         if code >= 128:
             raise FormatError("Reserved MessagePack extension code " + str(code - 256))
         return Value.Ext(ExtType(code, self._payload(length)))
+
+    def _timestamp(self, int64 length) -> Value:
+        auto seconds = 0
+        auto nanos = uint64(0)
+        if length == 4:
+            seconds = int64(self._word(4))
+        elif length == 8:
+            auto word = self._word(8)
+            seconds = int64(word & uint64(17179869183))
+            nanos = word >> uint64(34)
+        elif length == 12:
+            nanos = self._word(4)
+            seconds = int64(self._word(8))
+        else:
+            raise FormatError("MessagePack timestamp payload must be 4, 8, or 12 bytes")
+        if nanos > uint64(999999999):
+            raise FormatError("MessagePack timestamp nanoseconds must be in 0..999999999")
+        return Value.Timestamp(Timestamp(seconds, uint32(nanos)))
 
     def _array(self, int64 length, int64 depth) -> Value:
         # Each item needs a tag byte. Check before allocating the output list.
