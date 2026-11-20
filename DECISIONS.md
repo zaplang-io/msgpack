@@ -73,6 +73,22 @@ the remaining input before slicing payloads or allocating collections.
 Configurable per-type limits are tracked in issue #7.
 [msgpack-python decode errors](https://msgpack-python.readthedocs.io/en/latest/api.html#msgpack.unpackb)
 
+## Feed-based streaming (issue #4)
+
+`Packer.pack` returns the bytes for one value, following msgpack-python's
+default autoreset behavior. Callers write those bytes to their stream.
+`Unpacker` takes bytes via `feed`; iteration ends on `OutOfData` and resumes
+on subsequent feeds. The initial streaming surface covers immediate-return
+packing and caller-managed input. Accumulating packer output (`autoreset=False`)
+and file-like input are outside this surface.
+
+The default unread-byte budget is 100 MiB. A zero budget setting selects
+`2^32 - 1` bytes. `BufferFull` leaves the unread bytes and framing position
+intact. The framer resumes from its saved position and delegates each complete
+value to `unpackb`, which keeps text and key validation consistent with one-shot
+decoding. An invalid frame remains at the front of the stream.
+[msgpack-python streaming API](https://msgpack-python.readthedocs.io/en/latest/api.html#msgpack.Unpacker)
+
 <!--
 Add one section per decision as issues are implemented, e.g.:
 

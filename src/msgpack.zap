@@ -204,6 +204,23 @@ def _decoded_signed(uint64 word, int64 width) -> int64:
         return value - (1 << bits)
     return value
 
+def _integer_width(int64 tag) -> int64:
+    return 1 << ((tag - 0xcc) & 3)
+
+def _length_width(int64 tag) -> int64:
+    if tag >= 0xc4 and tag <= 0xc6:
+        return 1 << (tag - 0xc4)
+    if tag >= 0xd9 and tag <= 0xdb:
+        return 1 << (tag - 0xd9)
+    if tag >= 0xdc and tag <= 0xdf:
+        return 2 << ((tag - 0xdc) & 1)
+    return 0
+
+def _invalid_tag_message(int64 tag) -> str:
+    if tag == 0xc1:
+        return "Reserved MessagePack tag 0xc1"
+    return "MessagePack extensions are not supported yet"
+
 def _decoded_float(uint64 word, int64 bias, int64 fraction_bits, float64 fraction_scale) -> float64:
     auto fraction_mask = (uint64(1) << uint64(fraction_bits)) - uint64(1)
     auto fraction = int64(word & fraction_mask)
@@ -314,25 +331,23 @@ struct _Decoder:
         if tag == 0xc3:
             return Value.Bool(True)
         if tag >= 0xc4 and tag <= 0xc6:
-            return Value.Bin(self._payload(int64(self._word(1 << (tag - 0xc4)))))
+            return Value.Bin(self._payload(int64(self._word(_length_width(tag)))))
         if tag == 0xca:
             return Value.Float(_decoded_float(self._word(4), 127, 23, 8388608.0))
         if tag == 0xcb:
             return Value.Float(_decoded_float(self._word(8), 1023, 52, 4503599627370496.0))
         if tag >= 0xcc and tag <= 0xcf:
-            return _decoded_unsigned(self._word(1 << (tag - 0xcc)))
+            return _decoded_unsigned(self._word(_integer_width(tag)))
         if tag >= 0xd0 and tag <= 0xd3:
-            auto width = 1 << (tag - 0xd0)
+            auto width = _integer_width(tag)
             return Value.Int(_decoded_signed(self._word(width), width))
         if tag >= 0xd9 and tag <= 0xdb:
-            return self._text(int64(self._word(1 << (tag - 0xd9))))
+            return self._text(int64(self._word(_length_width(tag))))
         if tag == 0xdc or tag == 0xdd:
-            return self._array(int64(self._word(2 << (tag - 0xdc))), depth)
+            return self._array(int64(self._word(_length_width(tag))), depth)
         if tag == 0xde or tag == 0xdf:
-            return self._map(int64(self._word(2 << (tag - 0xde))), depth)
-        if tag == 0xc1:
-            raise FormatError("Reserved MessagePack tag 0xc1")
-        raise FormatError("MessagePack extensions are not supported yet")
+            return self._map(int64(self._word(_length_width(tag))), depth)
+        raise FormatError(_invalid_tag_message(tag))
 
 def unpackb(bytes data, bool raw = False, bool strict_map_key = True) -> Value:
     """Decode exactly one base MessagePack value.
@@ -350,3 +365,208 @@ def unpackb(bytes data, bool raw = False, bool strict_map_key = True) -> Value:
     if decoder.pos != len(data):
         raise ExtraData("Trailing data after MessagePack value at byte " + str(decoder.pos))
     return value
+
+# Incremental encoding with the same float policy for each value in a stream.
+struct Packer:
+    bool use_single_float = False
+
+    def pack(self, Value value) -> bytes:
+        """Encode one value for immediate writing to a stream."""
+        return packb(value, use_single_float=self.use_single_float)
+
+# Raised when a feed would exceed the unread-byte budget.
+struct BufferFull:
+    str message
+
+# Feed bytes from any source and iterate over the available complete values.
+struct Unpacker:
+    bool raw = False
+    bool strict_map_key = True
+    int64 max_buffer_size = 104857600
+    list[bytes] _chunks = []
+    int64 _count = 0
+    int64 _head_offset = 0
+    int64 _buffered = 0
+    int64 _scanned = 0
+    bool _ready = False
+    int64 _payload_left = 0
+    int64 _header_left = 0
+    int64 _header_tag = 0
+    int64 _length = 0
+    list[int64] _children = []
+    int64 _depth = 0
+
+    def feed(self, bytes chunk):
+        """Append input. Raise BufferFull without accepting any bytes if full."""
+        auto limit = self.max_buffer_size
+        if limit < 0:
+            raise ValueError("max_buffer_size must be nonnegative")
+        if limit == 0:
+            limit = 4294967295
+        if len(chunk) == 0:
+            return
+        if len(chunk) > limit - self._buffered:
+            raise BufferFull("MessagePack input exceeds max_buffer_size")
+
+        # Merge similarly sized chunks to bound fragment metadata even when
+        # input arrives one byte at a time. Preserve a partially consumed head.
+        auto current = chunk
+        while self._count > 0:
+            auto last = self._count - 1
+            if last == 0 and self._head_offset != 0:
+                break
+            auto previous = self._chunks[last]
+            if len(previous) > len(current):
+                break
+            self._chunks[last] = b""
+            self._count = last
+            current = previous + current
+        if self._count == len(self._chunks):
+            self._chunks.append(current)
+        else:
+            self._chunks[self._count] = current
+        self._count = self._count + 1
+        self._buffered = self._buffered + len(chunk)
+
+    def _done(self) -> bool:
+        while self._depth > 0:
+            auto parent = self._depth - 1
+            auto left = self._children[parent] - 1
+            if left > 0:
+                self._children[parent] = left
+                return False
+            self._depth = parent
+        return True
+
+    def _container(self, int64 children) -> bool:
+        if children == 0:
+            return self._done()
+        if self._depth == len(self._children):
+            self._children.append(children)
+        else:
+            self._children[self._depth] = children
+        self._depth = self._depth + 1
+        return False
+
+    def _skip_payload(self, int64 length) -> bool:
+        self._payload_left = length
+        if length == 0:
+            return self._done()
+        return False
+
+    def _step(self, int64 octet) -> bool:
+        if self._header_left > 0:
+            self._length = self._length * 256 + octet
+            self._header_left = self._header_left - 1
+            if self._header_left > 0:
+                return False
+            if self._header_tag == 0xdc or self._header_tag == 0xdd:
+                return self._container(self._length)
+            if self._header_tag == 0xde or self._header_tag == 0xdf:
+                return self._container(2 * self._length)
+            return self._skip_payload(self._length)
+        if self._depth > 1024:
+            raise StackError("MessagePack recursion limit exceeded")
+        if octet <= 0x7f or octet >= 0xe0 or octet == 0xc0 or octet == 0xc2 or octet == 0xc3:
+            return self._done()
+        if octet <= 0x8f:
+            return self._container(2 * (octet - 0x80))
+        if octet <= 0x9f:
+            return self._container(octet - 0x90)
+        if octet <= 0xbf:
+            return self._skip_payload(octet - 0xa0)
+        if octet == 0xca:
+            return self._skip_payload(4)
+        if octet == 0xcb:
+            return self._skip_payload(8)
+        if octet >= 0xcc and octet <= 0xd3:
+            return self._skip_payload(_integer_width(octet))
+        auto width = _length_width(octet)
+        if width > 0:
+            self._header_left = width
+            self._header_tag = octet
+            self._length = 0
+            return False
+        raise FormatError(_invalid_tag_message(octet))
+
+    def _scan(self):
+        # Keep the parser state and logical offset across calls. A feed may
+        # merge physical chunks, so locate the saved offset before resuming.
+        auto offset = self._head_offset + self._scanned
+        auto index = 0
+        while index < self._count and not self._ready:
+            auto chunk = self._chunks[index]
+            if offset >= len(chunk):
+                offset = offset - len(chunk)
+            else:
+                while offset < len(chunk) and not self._ready:
+                    auto count = 1
+                    if self._payload_left > 0:
+                        count = len(chunk) - offset
+                        if count > self._payload_left:
+                            count = self._payload_left
+                        self._payload_left = self._payload_left - count
+                        if self._payload_left == 0:
+                            self._ready = self._done()
+                    else:
+                        self._ready = self._step(chunk[offset])
+                    offset = offset + count
+                    self._scanned = self._scanned + count
+                offset = 0
+            index = index + 1
+
+    def _read_frame(self) -> Value:
+        list[bytes] parts = []
+        auto left = self._scanned
+        auto offset = self._head_offset
+        auto first = 0
+        while left > 0:
+            auto chunk = self._chunks[first]
+            auto count = len(chunk) - offset
+            if count > left:
+                count = left
+            auto end = offset + count
+            if offset == 0 and end == len(chunk):
+                parts.append(chunk)
+            else:
+                parts.append(chunk[offset:end])
+            left = left - count
+            offset = end
+            if offset == len(chunk):
+                first = first + 1
+                offset = 0
+        auto frame = _join_bytes(parts, 0, len(parts))
+        auto value = unpackb(frame, raw=self.raw, strict_map_key=self.strict_map_key)
+        # Advance only after validation so a data error cannot discard input.
+        auto index = 0
+        while index < self._count - first:
+            self._chunks[index] = self._chunks[first + index]
+            index = index + 1
+        auto count = index
+        while index < self._count:
+            self._chunks[index] = b""
+            index = index + 1
+        self._count = count
+        self._head_offset = offset
+        self._buffered = self._buffered - self._scanned
+        self._scanned = 0
+        self._ready = False
+        return value
+
+    def unpack(self) -> Value:
+        """Return the next value, or raise OutOfData until more bytes arrive."""
+        self._scan()
+        if not self._ready:
+            raise OutOfData("Incomplete MessagePack stream value")
+        return self._read_frame()
+
+    def __iter__(self) -> Unpacker:
+        """Return this single-pass iterator over the unread values."""
+        return self
+
+    def __next__(self) -> Value:
+        """Stop iteration on incomplete input so feed can resume it later."""
+        try:
+            return self.unpack()
+        except OutOfData:
+            raise StopIteration

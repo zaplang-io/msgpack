@@ -7,7 +7,7 @@ MessagePack binary serialization for [Zap](https://github.com/zaplang-io/zap) â€
 - Contributor & agent conventions: [AGENTS.md](AGENTS.md)
 - Design decisions: [DECISIONS.md](DECISIONS.md)
 
-> **Status: base-type codec.** `packb` and `unpackb` support the MessagePack base types. Streaming APIs and extension support are tracked in the epic.
+> **Status: base-type codec and streaming.** `packb`, `unpackb`, `Packer`, and `Unpacker` support the MessagePack base types. Extension support is tracked in the epic.
 
 ## Goals
 
@@ -47,6 +47,28 @@ def main():
 - `FormatError` signals malformed UTF-8, an invalid strict map key, a reserved tag, or an unsupported extension tag.
 - `StackError` signals a value nested beyond 1,024 levels.
 
+## Streaming
+
+Use `Packer().pack(value)` to encode each value for immediate writing to a stream. `Packer(use_single_float=True)` applies the same float setting to each call. Feed incoming chunks to `Unpacker` and iterate whenever more bytes arrive.
+
+```zap
+import msgpack
+
+def main():
+    auto packer = msgpack.Packer()
+    auto packed = packer.pack(msgpack.Value.Str("hello"))
+    auto reader = msgpack.Unpacker(max_buffer_size=4096)
+
+    reader.feed(packed[0:2])
+    reader.feed(packed[2:len(packed)])
+    for value in reader:
+        print(value)
+```
+
+`Unpacker.unpack()` gets one value and raises `OutOfData` when more bytes are needed. Iteration stops at that point and can resume after a later `feed`. A single feed can contain several values, and the unpacker keeps incomplete data between calls. `raw` and `strict_map_key` behave as in `unpackb`.
+
+`max_buffer_size` defaults to 100 MiB of unread data. Set it to a positive byte limit for your stream or to zero for the MessagePack-scale limit of `2^32 - 1` bytes. A feed that would exceed the limit raises `BufferFull` before accepting any bytes. Successful reads release capacity.
+
 ## Scope
 
 - Core `packb`/`unpackb` for all MessagePack base types (#2/#3).
@@ -58,7 +80,7 @@ def main():
 
 ## Build and test
 
-GitHub Actions runs **MessagePack CI** on every pull request and on pushes to `main`, using a pinned Zap runtime. The check must pass before merging. `tools/run-tests.sh` executes the Zap fixtures in `tests/` and compares their output with the adjacent `.expected` files. The codec fixtures check exact wire bytes and round-trips for integer, float, and length boundaries, plus typed rejections for truncated, malformed, trailing, and excessively nested input.
+GitHub Actions runs **MessagePack CI** on every pull request and on pushes to `main`, using `ghcr.io/zaplang-io/zap:latest`. The check must pass before merging. `tools/run-tests.sh` executes the Zap fixtures in `tests/` and compares their output with the adjacent `.expected` files. The codec fixtures check exact wire bytes, round-trips, typed errors, and incremental reads across split and coalesced chunks.
 
 Codec changes should include wire-format golden vectors and round-trips for valid data, plus rejection cases for malformed and truncated input. See [AGENTS.md](AGENTS.md) for the full coverage expectations.
 

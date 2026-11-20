@@ -13,8 +13,7 @@ jobs:
     name: MessagePack CI
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # Zap fd6bc0e includes unsigned integers for the full MessagePack range.
-    container: ghcr.io/zaplang-io/zap@sha256:ad34b8d071e25687494423e2dd8607fb94a4ee121d1951d67113a36f46000699
+    container: ghcr.io/zaplang-io/zap:latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.3.0
         with:
