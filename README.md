@@ -125,6 +125,7 @@ def main():
 | `max_buffer_size` | `Unpacker`, 100 MiB | Caps unread stream bytes. |
 | `datetime` and `timestamp` | Explicit `timestamp_from_datetime` and `Timestamp.to_datetime()` | The codec defaults to `Value.Timestamp` (`timestamp=0` in Python). The helpers convert an aware `DateTime` to a timestamp and convert a timestamp to UTC. |
 | `default` and `ext_hook` | Typed `packb_with_default[T]` and `unpackb_with_ext_hook[T]` | Optional top-level conversion through application extensions. The ordinary encoder accepts `Value` and the ordinary decoder returns `Value.Ext` for application extensions. |
+| `object_hook` and `object_pairs_hook` | Explicit conversion from `Value.Map(pairs)` | Match the map variant and convert its ordered pairs to your application type. Every duplicate key is available to the caller. |
 
 See [option decisions](DECISIONS.md#msgpack-python-option-parity-issue-8) for the Python options that have a different shape or are outside the Zap API.
 

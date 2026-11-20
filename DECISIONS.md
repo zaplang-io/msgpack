@@ -152,6 +152,7 @@ format.
 | --- | --- |
 | `datetime=True`, `timestamp=3` | Use the explicit `DateTime` helpers from issue #6. Dynamic timestamp modes 1 and 2 produce a float or an integer in Python. Zap returns the seconds and nanoseconds together as `Value.Timestamp`. |
 | `default`, `ext_hook` | The typed top-level helpers from issue #5 keep a single declared input or result type. |
+| `object_hook`, `object_pairs_hook` | Match `Value.Map(pairs)` after decoding and convert the ordered pairs explicitly. This gives callers control over duplicate keys and keys that cannot be represented in a dictionary. |
 | `use_list`, `list_hook` | Arrays always decode as `Value.Array(list[Value])`. Callers can convert the list after decoding. |
 | `strict_types` | The encoder already requires explicit `Value` variants, so there is no Python subtype dispatch to configure. |
 | `unicode_errors` | `Str` validates UTF-8. Use `raw=True` to handle the original bytes explicitly. |
