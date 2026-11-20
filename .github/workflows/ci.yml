@@ -13,8 +13,8 @@ jobs:
     name: MessagePack CI
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # Match the pinned Zap runtime used by zaplang-io/redis.
-    container: ghcr.io/zaplang-io/zap@sha256:7cf901e2a8d465be3c480474238764411f77308c925cd3df26ef46b240f4e5c4
+    # Zap fd6bc0e includes unsigned integers for the full MessagePack range.
+    container: ghcr.io/zaplang-io/zap@sha256:ad34b8d071e25687494423e2dd8607fb94a4ee121d1951d67113a36f46000699
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.3.0
         with:
