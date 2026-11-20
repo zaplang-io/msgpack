@@ -45,7 +45,24 @@ def main():
 - `OutOfData` signals incomplete input, including a declared length that cannot fit in the remaining bytes.
 - `ExtraData` signals trailing bytes after a complete value.
 - `FormatError` signals malformed UTF-8, an invalid strict map key, a reserved tag or extension code, or a malformed timestamp.
-- `StackError` signals a value nested beyond 1,024 levels.
+- `StackError` signals a value nested beyond `max_depth`.
+
+### Decode limits
+
+`unpackb` and `Unpacker` accept the same limits. Supply them as keyword arguments.
+
+| Option | Measures | Error |
+| --- | --- | --- |
+| `max_str_len` | UTF-8 bytes on the wire, including strings decoded with `raw=True` | `StrLimitError` |
+| `max_bin_len` | Binary payload bytes | `BinLimitError` |
+| `max_array_len` | Array elements | `ArrayLimitError` |
+| `max_map_len` | Map pairs, including duplicate keys | `MapLimitError` |
+| `max_ext_len` | Extension or Timestamp payload bytes, excluding the type code | `ExtLimitError` |
+| `max_depth` | Nesting level, with the root at zero | `StackError` |
+
+Length limits default to `-1` and allow any value that fits the available input or the streaming buffer budget. A nonnegative limit caps the declared length, with zero allowing only an empty payload or collection. `max_depth` defaults to 1,024 and can be lowered to zero. Invalid settings raise `ValueError`.
+
+The decoder checks explicit length limits as soon as the header is complete. It checks that the remaining input can hold the payload or minimum collection size before slicing or allocating. A length within its cap can still be incomplete.
 
 ## Application extensions
 
@@ -99,7 +116,7 @@ def main():
 - Core `packb`/`unpackb` for all MessagePack base types (#2/#3).
 - Streaming `Packer`/`Unpacker` with incremental `feed` (#4).
 - Extension types (`ExtType`) + `default`/`ext_hook` (#5), and the Timestamp extension (ext -1) (#6).
-- Decode limits + malformed-input hardening — untrusted input is a first-class concern (#7).
+- Configurable decode limits and a deterministic malformed-input corpus (#7).
 - Option parity: `use_bin_type`, `raw`, `strict_map_key`, … (#8).
 - The approved `Value` model represents maps as ordered key/value pairs and preserves duplicate keys. By default, decoding accepts string and binary keys. [Value-model decision](DECISIONS.md#dynamic-document-value-model-issue-10)
 
