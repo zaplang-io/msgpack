@@ -57,6 +57,21 @@ For a top-level custom object, `packb_with_default[Record](value, default=encode
 
 Use `msgpack.Value.Timestamp(msgpack.Timestamp(seconds, nanoseconds))` to encode the standard extension code `-1`. Seconds are signed Unix seconds. `nanoseconds` is a `uint32` from 0 through 999,999,999 and defaults to zero. For instants before the epoch, a positive nanosecond component is added to negative seconds. Encoding selects the shortest of the 32-, 64-, and 96-bit payload forms. Decoding returns `Value.Timestamp` with exact seconds and nanoseconds.
 
+`timestamp_from_datetime(dt)` accepts a timezone-aware Zap `DateTime` and preserves all nine fractional digits. `Timestamp.to_datetime()` returns a timezone-aware UTC value. It raises `ValueError` for timestamps beyond years 1 through 9999. The wire codec supports the full signed 64-bit seconds range.
+
+```zap
+import datetime
+import msgpack
+
+def main():
+    auto dt = datetime.rfc3339_parse("1970-01-01T05:30:00.123456789+05:30")
+    auto stamp = msgpack.timestamp_from_datetime(dt)
+    auto wire = msgpack.packb(msgpack.Value.Timestamp(stamp))
+    match msgpack.unpackb(wire):
+        case msgpack.Value.Timestamp(decoded):
+            print(datetime.isoformat(decoded.to_datetime()))
+```
+
 ## Streaming
 
 Use `Packer().pack(value)` to encode each value for immediate writing to a stream. `Packer(use_single_float=True)` applies the same float setting to each call. Feed incoming chunks to `Unpacker` and iterate whenever more bytes arrive.

@@ -100,6 +100,20 @@ application extension. Nested extensions remain `Value.Ext` for the caller to
 interpret. Callback exceptions propagate to the caller.
 [msgpack-python hooks](https://msgpack-python.readthedocs.io/en/latest/api.html)
 
+## Timestamp `DateTime` conversion (issue #6)
+
+`timestamp_from_datetime(dt)` and `Timestamp.to_datetime()` keep the
+`Value` signatures of `packb` and `unpackb` fixed. Encoding requires an aware
+`DateTime`, following msgpack-python's `datetime=True` pack option. It uses
+the stored offset to obtain Unix seconds and preserves the nanosecond field.
+Decoding to `DateTime` returns an aware UTC value and preserves the same
+fraction. Python's `datetime` conversion is limited to microseconds. Its
+standalone `Timestamp.from_datetime` also interprets naive values in the
+host timezone, while the aware-input rule here makes encoding independent
+of the host. The `DateTime` helper uses the Python year range 1 through 9999.
+`Timestamp` itself covers all signed 64-bit seconds.
+[msgpack-python `Timestamp`](https://msgpack-python.readthedocs.io/en/latest/api.html#msgpack.Timestamp), [Zap subsecond DateTime](https://github.com/zaplang-io/zap/issues/1148), [Zap timezone handling](https://github.com/zaplang-io/zap/issues/1149)
+
 <!--
 Add one section per decision as issues are implemented, e.g.:
 

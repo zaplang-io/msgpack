@@ -1,3 +1,4 @@
+import datetime
 import math
 
 # The application code and payload of a MessagePack extension.
@@ -9,6 +10,27 @@ struct ExtType:
 struct Timestamp:
     int64 seconds
     uint32 nanoseconds = uint32(0)
+
+    def to_datetime(self) -> DateTime:
+        """Return a timezone-aware UTC datetime, preserving nanoseconds."""
+        _check_timestamp_nanoseconds(int64(self.nanoseconds))
+        # The UTC instants at 0001-01-01T00:00:00 and 9999-12-31T23:59:59.
+        if self.seconds < -62135596800 or self.seconds > 253402300799:
+            raise ValueError("MessagePack timestamp is outside DateTime years 1..9999")
+        auto whole = datetime.from_timestamp(self.seconds)
+        auto utc = datetime.astimezone(whole, datetime.fixed_offset(0))
+        return datetime.replace(utc, nanosecond=int64(self.nanoseconds))
+
+def _check_timestamp_nanoseconds(int64 nanos):
+    if nanos < 0 or nanos > 999999999:
+        raise ValueError("MessagePack timestamp nanoseconds must be in 0..999999999")
+
+def timestamp_from_datetime(DateTime dt) -> Timestamp:
+    """Convert a timezone-aware datetime to exact Unix seconds and nanoseconds."""
+    if not dt.is_aware:
+        raise ValueError("MessagePack requires a timezone-aware DateTime")
+    _check_timestamp_nanoseconds(dt.nanosecond)
+    return Timestamp(datetime.to_timestamp(dt), uint32(dt.nanosecond))
 
 # A MessagePack document. Maps retain input order and duplicate keys.
 enum Value:
@@ -88,10 +110,9 @@ def _extension_header(ExtType extension) -> bytes:
     return _length_header(length, 0, -1, 0xc7, 0xc8, 0xc9) + bytes([code])
 
 def _timestamp_wire(Timestamp timestamp) -> bytes:
+    _check_timestamp_nanoseconds(int64(timestamp.nanoseconds))
     auto seconds = timestamp.seconds
     auto nanos = uint64(timestamp.nanoseconds)
-    if nanos > uint64(999999999):
-        raise ValueError("MessagePack timestamp nanoseconds must be in 0..999999999")
     list[int64] octets = []
     if seconds >= 0 and seconds <= 4294967295 and nanos == uint64(0):
         octets = [0xd6, 0xff]

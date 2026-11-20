@@ -1,3 +1,4 @@
+import datetime
 import msgpack
 
 def check(bool condition, str label):
@@ -115,9 +116,70 @@ def malformed():
     rejects_nanoseconds(uint32(1000000000))
     rejects_nanoseconds(uint32(-1))
 
+def datetime_roundtrip(DateTime dt, int64 seconds, int64 nanosecond):
+    auto stamp = msgpack.timestamp_from_datetime(dt)
+    check(stamp.seconds == seconds and int64(stamp.nanoseconds) == nanosecond, "aware datetime uses UTC seconds and exact fraction")
+    auto wire = msgpack.packb(msgpack.Value.Timestamp(stamp))
+    match msgpack.unpackb(wire):
+        case msgpack.Value.Timestamp(decoded):
+            auto utc = decoded.to_datetime()
+            check(utc.is_aware and utc.offset == 0, "decoded datetime is aware UTC")
+            check(datetime.to_timestamp(utc) == seconds, "decoded datetime seconds")
+            check(utc.nanosecond == nanosecond, "decoded datetime nanosecond")
+        case _:
+            raise ValueError("Expected Timestamp in datetime round-trip")
+
+def invalid_datetime(DateTime dt, str expected):
+    try:
+        msgpack.timestamp_from_datetime(dt)
+    except ValueError as message:
+        check(message.find(expected) >= 0, "invalid DateTime diagnostic")
+        return
+    raise ValueError("Expected datetime to be rejected")
+
+def invalid_datetime_conversion(msgpack.Timestamp stamp, str expected):
+    try:
+        stamp.to_datetime()
+    except ValueError as message:
+        check(message.find(expected) >= 0, "invalid Timestamp conversion diagnostic")
+        return
+    raise ValueError("Expected timestamp conversion to be rejected")
+
+def datetime_values():
+    datetime_roundtrip(datetime.rfc3339_parse("1970-01-01T00:00:00Z"), 0, 0)
+    datetime_roundtrip(datetime.rfc3339_parse("1970-01-01T00:00:00.000000001Z"), 0, 1)
+    datetime_roundtrip(datetime.rfc3339_parse("1970-01-01T05:30:00.123456789+05:30"), 0, 123456789)
+    datetime_roundtrip(datetime.rfc3339_parse("1969-12-31T16:00:00.123456789-08:00"), 0, 123456789)
+    datetime_roundtrip(datetime.rfc3339_parse("1970-01-01T05:29:59.999999999+05:30"), -1, 999999999)
+
+    auto ny = datetime.zone("America/New_York")
+    auto earlier = datetime.astimezone(datetime.rfc3339_parse("2024-11-03T05:30:00.000000007Z"), ny)
+    auto later = datetime.astimezone(datetime.rfc3339_parse("2024-11-03T06:30:00.000000007Z"), ny)
+    check(earlier.hour == later.hour and earlier.minute == later.minute, "named-zone fold shares a civil time")
+    check(earlier.offset == -14400 and later.offset == -18000, "named-zone fold retains distinct offsets")
+    datetime_roundtrip(earlier, 1730611800, 7)
+    datetime_roundtrip(later, 1730615400, 7)
+
+    auto first = msgpack.Timestamp(-62135596800).to_datetime()
+    check(first.year == 1 and first.month == 1 and first.day == 1, "first supported year")
+    datetime_roundtrip(first, -62135596800, 0)
+    auto last = msgpack.Timestamp(253402300799, uint32(999999999)).to_datetime()
+    check(last.year == 9999 and last.month == 12 and last.day == 31, "last supported year")
+    datetime_roundtrip(last, 253402300799, 999999999)
+
+    invalid_datetime(datetime.from_timestamp(0), "timezone-aware")
+    invalid_datetime(DateTime(1970, 1, 1, 0, 0, 0, 0, True, -1, -1), "timestamp nanoseconds")
+    invalid_datetime(DateTime(1970, 1, 1, 0, 0, 0, 0, True, -1, 1000000000), "timestamp nanoseconds")
+    invalid_datetime_conversion(msgpack.Timestamp(-62135596801), "outside DateTime")
+    invalid_datetime_conversion(msgpack.Timestamp(253402300800), "outside DateTime")
+    invalid_datetime_conversion(msgpack.Timestamp(-9223372036854775807 - 1), "outside DateTime")
+    invalid_datetime_conversion(msgpack.Timestamp(9223372036854775807), "outside DateTime")
+    invalid_datetime_conversion(msgpack.Timestamp(0, uint32(1000000000)), "timestamp nanoseconds")
+
 def main():
     widths()
     prefixes()
     noncanonical()
     malformed()
-    print("MessagePack Timestamp wire and rejection tests: PASS")
+    datetime_values()
+    print("MessagePack Timestamp wire, DateTime, and rejection tests: PASS")
