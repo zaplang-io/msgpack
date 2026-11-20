@@ -38,7 +38,9 @@ for item in unpacker:
 
 ## Build and test
 
-Standard Zap package build/test. **Every PR is validated by CI** (see AGENTS.md) — tests are exhaustive and include malformed/truncated input. Prefer round-trip and spec-vector tests.
+GitHub Actions runs **MessagePack CI** on every pull request and on pushes to `main`, using a pinned Zap runtime. The check must pass before merging. `tools/run-tests.sh` executes the Zap fixtures in `tests/` and compares their output with the adjacent `.expected` files. The bootstrap fixtures cover binary byte construction and verify that the compiler rejects an unresolved name with the expected diagnostic.
+
+Codec changes should include wire-format golden vectors and round-trips for valid data, plus rejection cases for malformed and truncated input. See [AGENTS.md](AGENTS.md) for the full coverage expectations.
 
 ## Development
 
