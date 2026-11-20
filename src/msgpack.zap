@@ -177,7 +177,13 @@ def _float(float64 value, bool use_single_float) -> bytes:
         return _tagged_word(0xca, _float_bits(value, 127, 23, 8388608.0), 4)
     return _tagged_word(0xcb, _float_bits(value, 1023, 52, 4503599627370496.0), 8)
 
-def _pack(Value value, bool use_single_float, int64 depth, list[bytes] parts):
+def _text_header(int64 length, bool use_bin_type) -> bytes:
+    auto tag8 = -1
+    if use_bin_type:
+        tag8 = 0xd9
+    return _length_header(length, 0xa0, 31, tag8, 0xda, 0xdb)
+
+def _pack(Value value, bool use_single_float, bool use_bin_type, int64 depth, list[bytes] parts):
     if depth > 1024:
         raise ValueError("MessagePack recursion limit exceeded")
     match value:
@@ -196,20 +202,23 @@ def _pack(Value value, bool use_single_float, int64 depth, list[bytes] parts):
             parts.append(_float(number, use_single_float))
         case Value.Str(text):
             auto payload = bytes(text)
-            parts.append(_length_header(len(payload), 0xa0, 31, 0xd9, 0xda, 0xdb))
+            parts.append(_text_header(len(payload), use_bin_type))
             parts.append(payload)
         case Value.Bin(payload):
-            parts.append(_length_header(len(payload), 0, -1, 0xc4, 0xc5, 0xc6))
+            if use_bin_type:
+                parts.append(_length_header(len(payload), 0, -1, 0xc4, 0xc5, 0xc6))
+            else:
+                parts.append(_text_header(len(payload), False))
             parts.append(payload)
         case Value.Array(items):
             parts.append(_length_header(len(items), 0x90, 15, -1, 0xdc, 0xdd))
             for item in items:
-                _pack(item, use_single_float, depth + 1, parts)
+                _pack(item, use_single_float, use_bin_type, depth + 1, parts)
         case Value.Map(pairs):
             parts.append(_length_header(len(pairs), 0x80, 15, -1, 0xde, 0xdf))
             for pair in pairs:
-                _pack(pair[0], use_single_float, depth + 1, parts)
-                _pack(pair[1], use_single_float, depth + 1, parts)
+                _pack(pair[0], use_single_float, use_bin_type, depth + 1, parts)
+                _pack(pair[1], use_single_float, use_bin_type, depth + 1, parts)
         case Value.Ext(extension):
             parts.append(_extension_header(extension))
             parts.append(extension.data)
@@ -223,15 +232,16 @@ def _join_bytes(list[bytes] parts, int64 start, int64 stop) -> bytes:
     auto middle = start + (stop - start) // 2
     return _join_bytes(parts, start, middle) + _join_bytes(parts, middle, stop)
 
-def packb(Value value, bool use_single_float = False) -> bytes:
+def packb(Value value, bool use_single_float = False, bool use_bin_type = True) -> bytes:
     """Serialize a MessagePack value to bytes.
 
     Floats use binary64 by default. Set use_single_float=True for binary32.
+    Set use_bin_type=False for legacy raw headers for strings and bytes.
     Raises ValueError for invalid extension codes or timestamp nanoseconds,
     oversized lengths, or nesting beyond 1,024 levels.
     """
     list[bytes] parts = []
-    _pack(value, use_single_float, 0, parts)
+    _pack(value, use_single_float, use_bin_type, 0, parts)
     return _join_bytes(parts, 0, len(parts))
 
 def packb_with_default[T](T value, fn(T) -> ExtType default) -> bytes:
@@ -546,13 +556,14 @@ def unpackb_with_ext_hook[T](bytes data, fn(int64, bytes) -> T ext_hook) -> T:
         case _:
             raise FormatError("Expected a top-level MessagePack application extension")
 
-# Incremental encoding with the same float policy for each value in a stream.
+# Incremental encoding with the same options for each value in a stream.
 struct Packer:
     bool use_single_float = False
+    bool use_bin_type = True
 
     def pack(self, Value value) -> bytes:
         """Encode one value for immediate writing to a stream."""
-        return packb(value, use_single_float=self.use_single_float)
+        return packb(value, use_single_float=self.use_single_float, use_bin_type=self.use_bin_type)
 
 # Raised when a feed would exceed the unread-byte budget.
 struct BufferFull:

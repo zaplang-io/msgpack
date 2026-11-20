@@ -134,13 +134,28 @@ root is at depth zero, with children, map keys, and map values counted one
 level deeper. Nesting beyond the configured depth raises `StackError`.
 [msgpack-python resource limits](https://msgpack-python.readthedocs.io/en/latest/api.html#msgpack.Unpacker)
 
-<!--
-Add one section per decision as issues are implemented, e.g.:
+## msgpack-python option parity (issue #8)
 
-## use_bin_type / raw defaults (issue #8)
-...which msgpack-python defaults the package adopts and why...
+The defaults are `use_bin_type=True`, `use_single_float=False`, `raw=False`,
+and `strict_map_key=True`, matching msgpack-python. `use_bin_type=False`
+applies the legacy raw header family to strings and binary values, including
+keys and nested values. It selects `fixstr`, `str16`, or `str32`, skipping
+`str8`. The `raw` read option recovers the bytes of those values. Strict key
+validation still applies to raw reads. Extensions and timestamps keep their
+wire types in both modes.
 
-## ExtType / ext_hook shape (issues #5/#6)
-...the Zap representation of ExtType and the hook signatures...
+The approved `Value` type uses lists for arrays and ordered pairs for maps.
+The remaining Python options relate to the API shape rather than the wire
+format.
 
--->
+| Python option | Zap behavior |
+| --- | --- |
+| `datetime=True`, `timestamp=3` | Use the explicit `DateTime` helpers from issue #6. Dynamic timestamp modes 1 and 2 produce a float or an integer in Python. Zap returns the seconds and nanoseconds together as `Value.Timestamp`. |
+| `default`, `ext_hook` | The typed top-level helpers from issue #5 keep a single declared input or result type. |
+| `use_list`, `list_hook` | Arrays always decode as `Value.Array(list[Value])`. Callers can convert the list after decoding. |
+| `strict_types` | The encoder already requires explicit `Value` variants, so there is no Python subtype dispatch to configure. |
+| `unicode_errors` | `Str` validates UTF-8. Use `raw=True` to handle the original bytes explicitly. |
+| `autoreset`, `buf_size` | `Packer.pack` returns encoded bytes per call, as in the default autoreset mode. Callers manage output buffering. |
+| `file_like`, `read_size` | The source owns reads and supplies bytes with `Unpacker.feed`. |
+
+[msgpack-python options](https://msgpack-python.readthedocs.io/en/latest/api.html), [msgpack-python legacy headers](https://github.com/msgpack/msgpack-python/blob/main/msgpack/fallback.py)
