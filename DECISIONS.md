@@ -51,6 +51,16 @@ A typed conversion layer can be added later for callers with known schemas.
   and nanoseconds from 0 through 999,999,999. Reject other reserved codes by
   default. [MessagePack extension types](https://github.com/msgpack/msgpack/blob/master/spec.md#extension-types), [msgpack-python `ExtType` and `Timestamp`](https://msgpack-python.readthedocs.io/en/latest/api.html#msgpack.ExtType)
 
+## Base encoder floats and nesting (issue #2)
+
+`packb` defaults to binary64. `use_single_float=True` selects binary32 with
+round-to-nearest, ties-to-even, matching the behavior of msgpack-python's
+C extension. Both widths preserve signed zero and infinity. The pure-Zap
+encoder emits a canonical positive quiet NaN for any NaN input. MessagePack
+allows IEEE 754 NaNs and leaves their payload bits unspecified. The encoder
+limits nesting to 1,024 levels, the same budget used by msgpack-python.
+[MessagePack float formats](https://github.com/msgpack/msgpack/blob/master/spec.md#float-format-family), [msgpack-python packer](https://github.com/msgpack/msgpack-python/blob/main/msgpack/_packer.pyx)
+
 <!--
 Add one section per decision as issues are implemented, e.g.:
 
