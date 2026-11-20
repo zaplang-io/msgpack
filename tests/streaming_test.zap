@@ -142,7 +142,7 @@ def invalid(msgpack.Unpacker reader):
     raise ValueError("Expected FormatError during iteration")
 
 def malformed():
-    for wire in [bytes([0xc1]), bytes([0xa1, 0xff]), bytes([0x81, 1, 0xc0]), bytes([0xd4, 0, 0])]:
+    for wire in [bytes([0xc1]), bytes([0xa1, 0xff]), bytes([0x81, 1, 0xc0]), bytes([0xd4, 0xfe, 0])]:
         auto reader = msgpack.Unpacker()
         reader.feed(bytes([0xc0]) + wire)
         expect(reader, bytes([0xc0]), "valid prefix before malformed value")

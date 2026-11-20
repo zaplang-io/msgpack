@@ -149,9 +149,9 @@ def rejected(msgpack.Value value, str expected):
     check(did_reject, "packb must reject " + expected)
 
 def invalid():
-    auto extension = msgpack.Value.Ext(msgpack.ExtType(1, b"x"))
-    rejected(extension, "application extensions")
-    rejected(msgpack.Value.Array([extension]), "application extensions")
+    auto extension = msgpack.Value.Ext(msgpack.ExtType(128, b"x"))
+    rejected(extension, "application extension code")
+    rejected(msgpack.Value.Array([extension]), "application extension code")
     rejected(msgpack.Value.Timestamp(msgpack.Timestamp(0, uint32(0))), "timestamps")
 
     msgpack.Value deep = msgpack.Value.Nil

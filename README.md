@@ -7,7 +7,7 @@ MessagePack binary serialization for [Zap](https://github.com/zaplang-io/zap) â€
 - Contributor & agent conventions: [AGENTS.md](AGENTS.md)
 - Design decisions: [DECISIONS.md](DECISIONS.md)
 
-> **Status: base-type codec and streaming.** `packb`, `unpackb`, `Packer`, and `Unpacker` support the MessagePack base types. Extension support is tracked in the epic.
+> **Status: base types and application extensions.** `packb`, `unpackb`, `Packer`, and `Unpacker` support the base types and `ExtType`. Timestamp support is tracked in the epic.
 
 ## Goals
 
@@ -24,7 +24,7 @@ def main():
     auto single = msgpack.packb(msgpack.Value.Float(1.5), use_single_float=True)
 ```
 
-`packb` chooses the shortest integer and collection or payload length headers. `Str` encodes UTF-8 and `Bin` keeps the original bytes. Maps retain the order and duplicates in their pair lists. Float payloads default to binary64, and `use_single_float=True` selects binary32 throughout the document. NaNs encode as a canonical quiet NaN. The encoder raises `ValueError` for extension variants, lengths outside the wire limit, and nesting beyond 1,024 levels.
+`packb` chooses the shortest integer and collection or payload length headers. `Str` encodes UTF-8 and `Bin` keeps the original bytes. Maps retain the order and duplicates in their pair lists. Float payloads default to binary64, and `use_single_float=True` selects binary32 throughout the document. NaNs encode as a canonical quiet NaN. The encoder raises `ValueError` for invalid extension codes, timestamps, lengths outside the wire limit, and nesting beyond 1,024 levels.
 
 ## Decoding
 
@@ -44,8 +44,14 @@ def main():
 
 - `OutOfData` signals incomplete input, including a declared length that cannot fit in the remaining bytes.
 - `ExtraData` signals trailing bytes after a complete value.
-- `FormatError` signals malformed UTF-8, an invalid strict map key, a reserved tag, or an unsupported extension tag.
+- `FormatError` signals malformed UTF-8, an invalid strict map key, a reserved tag or extension code, or a timestamp.
 - `StackError` signals a value nested beyond 1,024 levels.
+
+## Application extensions
+
+Wrap `msgpack.ExtType(code, data)` in `msgpack.Value.Ext` to encode an application-defined extension. The code is an integer from 0 through 127 and the payload is `bytes`. Encoding uses `fixext` for 1, 2, 4, 8, or 16 payload bytes and the smallest variable-length extension header otherwise. The decoder returns `Value.Ext` with the original code and bytes, including inside arrays and maps. `raw` applies to text fields and leaves extension payloads as bytes.
+
+For a top-level custom object, `packb_with_default[Record](value, default=encode)` calls your `encode` function to produce an `ExtType`. `unpackb_with_ext_hook[Record](data, ext_hook=decode)` validates one complete application extension, then calls your `decode(code, payload)` function and returns a `Record`.
 
 ## Streaming
 
