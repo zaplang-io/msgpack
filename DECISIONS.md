@@ -61,6 +61,18 @@ allows IEEE 754 NaNs and leaves their payload bits unspecified. The encoder
 limits nesting to 1,024 levels, the same budget used by msgpack-python.
 [MessagePack float formats](https://github.com/msgpack/msgpack/blob/master/spec.md#float-format-family), [msgpack-python packer](https://github.com/msgpack/msgpack-python/blob/main/msgpack/_packer.pyx)
 
+## Single-document decode errors and bounds (issue #3)
+
+`unpackb` reports incomplete input through the catchable `OutOfData` type.
+This uses the msgpack-python streaming error name for both entry points.
+Python's one-shot `unpackb` uses `ValueError` for incomplete input. The Zap
+decoder raises `ExtraData` when a complete value is followed by more bytes,
+`FormatError` for invalid or unsupported formats, and `StackError` for
+nesting beyond 1,024 levels. It verifies that declared lengths can fit in
+the remaining input before slicing payloads or allocating collections.
+Configurable per-type limits are tracked in issue #7.
+[msgpack-python decode errors](https://msgpack-python.readthedocs.io/en/latest/api.html#msgpack.unpackb)
+
 <!--
 Add one section per decision as issues are implemented, e.g.:
 

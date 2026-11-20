@@ -7,7 +7,7 @@ MessagePack binary serialization for [Zap](https://github.com/zaplang-io/zap) â€
 - Contributor & agent conventions: [AGENTS.md](AGENTS.md)
 - Design decisions: [DECISIONS.md](DECISIONS.md)
 
-> **Status: base-type encoding.** `packb` encodes the MessagePack base types. The decoder, streaming APIs, and extension support are tracked in the epic.
+> **Status: base-type codec.** `packb` and `unpackb` support the MessagePack base types. Streaming APIs and extension support are tracked in the epic.
 
 ## Goals
 
@@ -26,6 +26,27 @@ def main():
 
 `packb` chooses the shortest integer and collection or payload length headers. `Str` encodes UTF-8 and `Bin` keeps the original bytes. Maps retain the order and duplicates in their pair lists. Float payloads default to binary64, and `use_single_float=True` selects binary32 throughout the document. NaNs encode as a canonical quiet NaN. The encoder raises `ValueError` for extension variants, lengths outside the wire limit, and nesting beyond 1,024 levels.
 
+## Decoding
+
+`unpackb(data, raw=False, strict_map_key=True)` decodes one complete value. `raw=True` returns string payloads as bytes, including string keys. Disable `strict_map_key` to allow other value types as map keys. Maps preserve input order and repeated keys in both modes.
+
+```zap
+import msgpack
+
+def main():
+    try:
+        auto value = msgpack.unpackb(bytes([0x81, 0xa2, 0x69, 0x64, 0x01]))
+    except msgpack.OutOfData:
+        print("Incomplete MessagePack value")
+    except msgpack.ExtraData:
+        print("Exactly one value is required")
+```
+
+- `OutOfData` signals incomplete input, including a declared length that cannot fit in the remaining bytes.
+- `ExtraData` signals trailing bytes after a complete value.
+- `FormatError` signals malformed UTF-8, an invalid strict map key, a reserved tag, or an unsupported extension tag.
+- `StackError` signals a value nested beyond 1,024 levels.
+
 ## Scope
 
 - Core `packb`/`unpackb` for all MessagePack base types (#2/#3).
@@ -37,7 +58,7 @@ def main():
 
 ## Build and test
 
-GitHub Actions runs **MessagePack CI** on every pull request and on pushes to `main`, using a pinned Zap runtime. The check must pass before merging. `tools/run-tests.sh` executes the Zap fixtures in `tests/` and compares their output with the adjacent `.expected` files. The encoder fixtures check exact wire bytes for integer, float, and length boundaries and check rejection of unsupported values and excessive nesting.
+GitHub Actions runs **MessagePack CI** on every pull request and on pushes to `main`, using a pinned Zap runtime. The check must pass before merging. `tools/run-tests.sh` executes the Zap fixtures in `tests/` and compares their output with the adjacent `.expected` files. The codec fixtures check exact wire bytes and round-trips for integer, float, and length boundaries, plus typed rejections for truncated, malformed, trailing, and excessively nested input.
 
 Codec changes should include wire-format golden vectors and round-trips for valid data, plus rejection cases for malformed and truncated input. See [AGENTS.md](AGENTS.md) for the full coverage expectations.
 
