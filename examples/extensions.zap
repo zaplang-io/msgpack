@@ -15,6 +15,7 @@ def decode_note(int64 code, bytes payload) -> Note:
 def main():
     auto wire = msgpack.packb_with_default[Note](Note("hello"), default=encode_note)
     auto note = msgpack.unpackb_with_ext_hook[Note](wire, ext_hook=decode_note)
+    assert note.text == "hello"
     print("note=" + note.text)
 
     auto dt = datetime.rfc3339_parse("1970-01-01T05:30:00.123456789+05:30")
@@ -23,6 +24,9 @@ def main():
     match msgpack.unpackb(packed):
         case msgpack.Value.Timestamp(decoded):
             auto utc = decoded.to_datetime()
+            assert utc.is_aware and utc.offset == 0
+            assert datetime.to_timestamp(utc) == 0
+            assert utc.nanosecond == 123456789
             print("UTC seconds=" + str(datetime.to_timestamp(utc)))
             print("nanoseconds=" + str(utc.nanosecond))
         case _:

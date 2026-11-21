@@ -1,8 +1,5 @@
-import msgpack
-
 def check(bool condition, str label):
-    if not condition:
-        raise ValueError("FAIL: " + label)
+    assert condition, label
 
 # Fixed seed and recurrence keep every generated failure reproducible.
 def next_seed(int64 seed) -> int64:
@@ -34,36 +31,37 @@ def generated_value(int64 seed, int64 depth) -> bytes:
 
 def expect_incomplete(bytes wire):
     try:
-        msgpack.unpackb(wire)
-    except msgpack.OutOfData:
+        unpackb(wire)
+    except OutOfData:
         return
     raise ValueError("Expected truncated generated value")
 
 def expect_trailing(bytes wire):
     try:
-        msgpack.unpackb(wire)
-    except msgpack.ExtraData:
+        unpackb(wire)
+    except ExtraData:
         return
     raise ValueError("Expected generated trailing bytes to fail")
 
 def expect_reserved(bytes wire):
     try:
-        msgpack.unpackb(wire)
-    except msgpack.FormatError:
+        unpackb(wire)
+    except FormatError:
         return
     raise ValueError("Expected generated reserved tag to fail")
 
-def structured_corpus():
+@test
+def test_generated_structured_corpus():
     auto seed = 322
     for sample in range(0, 256):
         seed = next_seed(seed)
         auto wire = generated_value(seed, 5)
-        check(msgpack.packb(msgpack.unpackb(wire)) == wire, "generated canonical frame " + str(sample))
+        check(packb(unpackb(wire)) == wire, "generated canonical frame " + str(sample))
         auto split = seed % len(wire)
-        auto reader = msgpack.Unpacker(max_buffer_size=len(wire))
+        auto reader = Unpacker(max_buffer_size=len(wire))
         reader.feed(wire[0:split])
         reader.feed(wire[split:len(wire)])
-        check(msgpack.packb(reader.unpack()) == wire, "generated streaming frame " + str(sample))
+        check(packb(reader.unpack()) == wire, "generated streaming frame " + str(sample))
         auto end = 0
         while end < len(wire):
             expect_incomplete(wire[0:end])
@@ -72,32 +70,33 @@ def structured_corpus():
         expect_trailing(wire + bytes([0xc1]))
 
 def decode_arbitrary(bytes wire) -> bool:
-    msgpack.Value parsed = msgpack.Value.Nil
+    Value parsed = Value.Nil
     try:
-        parsed = msgpack.unpackb(wire, max_str_len=16, max_bin_len=16, max_array_len=8, max_map_len=8, max_ext_len=16, max_depth=8)
-    except msgpack.OutOfData:
+        parsed = unpackb(wire, max_str_len=16, max_bin_len=16, max_array_len=8, max_map_len=8, max_ext_len=16, max_depth=8)
+    except OutOfData:
         return False
-    except msgpack.FormatError:
+    except FormatError:
         return False
-    except msgpack.ExtraData:
+    except ExtraData:
         return False
-    except msgpack.StrLimitError:
+    except StrLimitError:
         return False
-    except msgpack.BinLimitError:
+    except BinLimitError:
         return False
-    except msgpack.ArrayLimitError:
+    except ArrayLimitError:
         return False
-    except msgpack.MapLimitError:
+    except MapLimitError:
         return False
-    except msgpack.ExtLimitError:
+    except ExtLimitError:
         return False
-    except msgpack.StackError:
+    except StackError:
         return False
-    auto canonical = msgpack.packb(parsed)
-    check(msgpack.packb(msgpack.unpackb(canonical)) == canonical, "accepted arbitrary input canonicalizes consistently")
+    auto canonical = packb(parsed)
+    check(packb(unpackb(canonical)) == canonical, "accepted arbitrary input canonicalizes consistently")
     return True
 
-def arbitrary_corpus():
+@test
+def test_generated_arbitrary_corpus():
     auto seed = 1919
     auto accepted = 0
     for sample in range(0, 512):
@@ -110,8 +109,3 @@ def arbitrary_corpus():
         if decode_arbitrary(bytes(octets)):
             accepted = accepted + 1
     check(accepted > 0 and accepted < 512, "arbitrary corpus includes accepted and rejected cases")
-
-def main():
-    structured_corpus()
-    arbitrary_corpus()
-    print("Generated MessagePack corpus seeds 322 and 1919: PASS")

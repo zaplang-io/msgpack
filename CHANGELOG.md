@@ -13,4 +13,7 @@
 - Added typed decode errors and configurable payload, collection, extension,
   and nesting limits, with wire goldens and deterministic malformed-input
   fixtures in required CI.
-- Added installed-package examples, the support matrix, and release preflight.
+- Added installed-package examples with assertions, the support matrix, and
+  release preflight.
+- Run codec coverage as native `zap test` cases with a compiler diagnostic
+  doctest.

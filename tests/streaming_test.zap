@@ -1,23 +1,20 @@
-import msgpack
-
 def check(bool condition, str label):
-    if not condition:
-        raise ValueError("FAIL: " + label)
+    assert condition, label
 
-def empty(msgpack.Unpacker reader, str label):
+def empty(Unpacker reader, str label):
     try:
         reader.unpack()
-    except msgpack.OutOfData:
+    except OutOfData:
         return
     raise ValueError("Expected OutOfData: " + label)
 
-def expect(msgpack.Unpacker reader, bytes wire, str label):
-    check(msgpack.packb(reader.unpack()) == wire, label)
+def expect(Unpacker reader, bytes wire, str label):
+    check(packb(reader.unpack()) == wire, label)
 
 def split(bytes wire):
     auto offset = 0
     while offset < len(wire):
-        auto reader = msgpack.Unpacker()
+        auto reader = Unpacker()
         reader.feed(wire[0:offset])
         empty(reader, "prefix")
         empty(reader, "retry with no new bytes")
@@ -26,7 +23,8 @@ def split(bytes wire):
         empty(reader, "after one value")
         offset = offset + 1
 
-def short_chunks():
+@test
+def test_value_splits():
     list[bytes] wires = [
         bytes([0xc0]), bytes([0xc2]), bytes([0xc3]), bytes([127]), bytes([0xe0]),
         bytes([0xcc, 128]), bytes([0xcd, 1, 0]), bytes([0xce, 0, 1, 0, 0]), bytes([0xcf, 0, 0, 0, 1, 0, 0, 0, 0]),
@@ -48,8 +46,8 @@ def short_chunks():
         bytes([0xca, 0x3f, 0xc0, 0, 0]), bytes([0xdd, 0, 0, 0, 0]), bytes([0xdf, 0, 0, 0, 0]),
     ]
     for wire in long_headers:
-        auto reader = msgpack.Unpacker()
-        auto expected = msgpack.packb(msgpack.unpackb(wire))
+        auto reader = Unpacker()
+        auto expected = packb(unpackb(wire))
         auto index = 0
         while index < len(wire):
             empty(reader, "one byte at a time before final byte")
@@ -57,14 +55,15 @@ def short_chunks():
             index = index + 1
         expect(reader, expected, "resumed wire header")
 
-def coalesced():
-    auto writer = msgpack.Packer()
-    auto single = msgpack.Packer(use_single_float=True)
-    check(single.pack(msgpack.Value.Float(1.5)) == bytes([0xca, 0x3f, 0xc0, 0, 0]), "packer retains float option")
-    check(writer.pack(msgpack.Value.Float(1.5)) == bytes([0xcb, 0x3f, 0xf8, 0, 0, 0, 0, 0, 0]), "independent default packer")
-    auto reader = msgpack.Unpacker()
-    auto independent = msgpack.Unpacker()
-    reader.feed(writer.pack(msgpack.Value.Int(7)) + writer.pack(msgpack.Value.Nil) + bytes([0xc4]))
+@test
+def test_coalesced_values():
+    auto writer = Packer()
+    auto single = Packer(use_single_float=True)
+    check(single.pack(Value.Float(1.5)) == bytes([0xca, 0x3f, 0xc0, 0, 0]), "packer retains float option")
+    check(writer.pack(Value.Float(1.5)) == bytes([0xcb, 0x3f, 0xf8, 0, 0, 0, 0, 0, 0]), "independent default packer")
+    auto reader = Unpacker()
+    auto independent = Unpacker()
+    reader.feed(writer.pack(Value.Int(7)) + writer.pack(Value.Nil) + bytes([0xc4]))
     empty(independent, "unpackers do not share input")
     auto drained = b""
     for value in reader:
@@ -80,15 +79,16 @@ def coalesced():
     check(drained == bytes([8]), "iteration resumes after more data")
     empty(reader, "coalesced input drained")
 
-def full(msgpack.Unpacker reader, bytes chunk):
+def full(Unpacker reader, bytes chunk):
     try:
         reader.feed(chunk)
-    except msgpack.BufferFull:
+    except BufferFull:
         return
     raise ValueError("Expected BufferFull")
 
-def limits():
-    auto reader = msgpack.Unpacker(max_buffer_size=4)
+@test
+def test_stream_buffer_limits():
+    auto reader = Unpacker(max_buffer_size=4)
     full(reader, bytes([0xc0, 0xc0, 0xc0, 0xc0, 0xc0]))
     empty(reader, "rejected chunk is atomic")
     reader.feed(bytes([0xc4, 2]))
@@ -104,24 +104,25 @@ def limits():
     full(reader, bytes([8]))
     expect(reader, bytes([4]), "partial-head consumption releases capacity")
 
-    auto large_claim = msgpack.Unpacker(max_buffer_size=8)
+    auto large_claim = Unpacker(max_buffer_size=8)
     large_claim.feed(bytes([0xc6, 0xff, 0xff, 0xff, 0xff, 1, 2, 3]))
     empty(large_claim, "declared length alone cannot allocate the payload")
     full(large_claim, bytes([4]))
     empty(large_claim, "full buffer retained consistently")
 
-    auto zero = msgpack.Unpacker(max_buffer_size=0)
+    auto zero = Unpacker(max_buffer_size=0)
     zero.feed(bytes([0xc0]))
     expect(zero, bytes([0xc0]), "zero selects the protocol-scale default")
-    auto negative = msgpack.Unpacker(max_buffer_size=-1)
+    auto negative = Unpacker(max_buffer_size=-1)
     try:
         negative.feed(bytes([0xc0]))
     except ValueError:
         return
     raise ValueError("Expected negative max_buffer_size rejection")
 
-def bytewise_payload():
-    auto reader = msgpack.Unpacker(max_buffer_size=1027)
+@test
+def test_bytewise_payload():
+    auto reader = Unpacker(max_buffer_size=1027)
     reader.feed(bytes([0xc5, 4, 0]))
     auto index = 0
     auto payload = b"x"
@@ -133,27 +134,28 @@ def bytewise_payload():
         index = index + 1
     expect(reader, bytes([0xc5, 4, 0]) + payload, "one-byte feeds reconstruct entire body")
 
-def invalid(msgpack.Unpacker reader):
+def invalid(Unpacker reader):
     try:
         for value in reader:
             raise ValueError("Malformed payload unexpectedly yielded a value")
-    except msgpack.FormatError:
+    except FormatError:
         return
     raise ValueError("Expected FormatError during iteration")
 
-def malformed():
+@test
+def test_malformed_streams():
     for wire in [bytes([0xc1]), bytes([0xa1, 0xff]), bytes([0x81, 1, 0xc0]), bytes([0xd4, 0xfe, 0])]:
-        auto reader = msgpack.Unpacker()
+        auto reader = Unpacker()
         reader.feed(bytes([0xc0]) + wire)
         expect(reader, bytes([0xc0]), "valid prefix before malformed value")
         invalid(reader)
         invalid(reader)
 
-    auto raw = msgpack.Unpacker(raw=True, strict_map_key=False)
+    auto raw = Unpacker(raw=True, strict_map_key=False)
     raw.feed(bytes([0x81, 1, 0xa1, 0xff]))
     expect(raw, bytes([0x81, 1, 0xc4, 1, 0xff]), "stream options forwarded to decoder")
 
-    auto deep = msgpack.Unpacker()
+    auto deep = Unpacker()
     auto prefix = bytes([0x91])
     while len(prefix) < 1024:
         prefix = prefix + prefix
@@ -162,14 +164,6 @@ def malformed():
     deep.feed(prefix + bytes([0x91, 0xc0]))
     try:
         deep.unpack()
-    except msgpack.StackError:
+    except StackError:
         return
     raise ValueError("Expected StackError")
-
-def main():
-    short_chunks()
-    coalesced()
-    limits()
-    bytewise_payload()
-    malformed()
-    print("MessagePack streaming split and rejection tests: PASS")
