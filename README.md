@@ -7,11 +7,21 @@ MessagePack binary serialization for [Zap](https://github.com/zaplang-io/zap) �
 - Contributor & agent conventions: [AGENTS.md](AGENTS.md)
 - Design decisions: [DECISIONS.md](DECISIONS.md)
 
-> **Status: base types, application extensions, and timestamps.** `packb`, `unpackb`, `Packer`, and `Unpacker` support the base types, `ExtType`, and `Timestamp`.
+> **Status: 0.1.0 unreleased candidate.** `packb`, `unpackb`, `Packer`, and `Unpacker` support the base types, `ExtType`, and `Timestamp`.
 
 ## Goals
 
 A pure-Zap MessagePack codec whose public API mirrors [**msgpack-python**](https://msgpack-python.readthedocs.io/) (`packb` / `unpackb`, the streaming `Packer` / `Unpacker`, `ExtType`, `Timestamp`, `default` / `ext_hook`, and the option set) as closely as Zap's static typing allows. API-parity with the popular Python library is a project rule — see [AGENTS.md](AGENTS.md). Output is byte-for-byte conformant with the [MessagePack spec](https://github.com/msgpack/msgpack/blob/master/spec.md).
+
+## Install and run an example
+
+Add a reviewed checkout as a Zap path dependency and materialize the project's
+`zenv`. CI runs each example as an external application using that installation.
+[Installation and release checklist](docs/RELEASING.md) · [Support matrix](docs/SUPPORT.md)
+
+- Encode and decode an ordered map with a binary payload. [Round-trip example](examples/roundtrip.zap)
+- Drain a stream with a value split across two feeds. [Streaming example](examples/streaming.zap)
+- Use typed application extension hooks and convert an aware `DateTime`. [Extension and Timestamp example](examples/extensions.zap)
 
 ## Encoding
 
@@ -140,7 +150,7 @@ See [option decisions](DECISIONS.md#msgpack-python-option-parity-issue-8) for th
 
 ## Build and test
 
-GitHub Actions runs **MessagePack CI** on every pull request and on pushes to `main`, using `ghcr.io/zaplang-io/zap:latest`. The check must pass before merging. `tools/run-tests.sh` executes the Zap fixtures in `tests/` and compares their output with the adjacent `.expected` files. The codec fixtures check exact wire bytes, round-trips, typed errors, and incremental reads across split and coalesced chunks.
+GitHub Actions runs **MessagePack CI** on every pull request and on pushes to `main`, using `ghcr.io/zaplang-io/zap:latest`. The check must pass before merging. It runs the codec fixtures, validates candidate metadata, and executes the examples from a path-dependent application. The codec fixtures check exact wire bytes, round-trips, typed errors, and incremental reads across split and coalesced chunks. [Changelog](CHANGELOG.md)
 
 Codec changes should include wire-format golden vectors and round-trips for valid data, plus rejection cases for malformed and truncated input. See [AGENTS.md](AGENTS.md) for the full coverage expectations.
 
