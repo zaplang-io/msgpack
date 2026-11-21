@@ -15,10 +15,6 @@ test -s "$root/docs/RELEASING.md"
 grep -Fq "## $version (" "$root/CHANGELOG.md"
 for source in "$root"/examples/*.zap; do
     test -s "$source"
-    test -s "${source%.zap}.expected"
-done
-for golden in "$root"/examples/*.expected; do
-    test -s "${golden%.expected}.zap"
 done
 
 if [ "$#" -gt 1 ]; then

@@ -25,14 +25,14 @@ the dependency checkout intentionally.
 
 ## Required CI checks
 
-- `tools/run-tests.sh` runs the codec fixtures, malformed-input corpus, and
-  compiler rejection fixture.
+- `tools/run-tests.sh` runs the codec fixtures and malformed-input corpus with
+  `zap test`, plus a compiler rejection doctest with `zap test --doc`.
 - `tools/check-release.sh` checks the package version, changelog, support
-  matrix, release checklist, and the pairing of examples with golden output.
+  matrix, release checklist, and example source files.
 - `tools/run-package-tests.sh` validates packaging with `zap publish --dry-run`,
   materializes a path dependency in a fresh external application, and runs
-  every example through its `src/main.zap` entry point. It compares stdout with
-  each checked-in `.expected` file.
+  every example through its `src/main.zap` entry point. Each example asserts its
+  decoded values and exits unsuccessfully when they differ.
 
 ## Release checklist
 

@@ -150,7 +150,7 @@ See [option decisions](DECISIONS.md#msgpack-python-option-parity-issue-8) for th
 
 ## Build and test
 
-GitHub Actions runs **MessagePack CI** on every pull request and on pushes to `main`, using `ghcr.io/zaplang-io/zap:latest`. The check must pass before merging. It runs the codec fixtures, validates candidate metadata, and executes the examples from a path-dependent application. The codec fixtures check exact wire bytes, round-trips, typed errors, and incremental reads across split and coalesced chunks. [Changelog](CHANGELOG.md)
+GitHub Actions runs **MessagePack CI** on every pull request and on pushes to `main`, using `ghcr.io/zaplang-io/zap:latest`. The check must pass before merging. `sh tools/run-tests.sh` stages each suite with the library and runs the named `@test` cases using `zap test`. The tests assert exact wire bytes, round-trips, typed errors, and incremental reads across split and coalesced chunks. A native doctest checks the compiler diagnostic. CI also validates candidate metadata and runs the examples with assertions in a path-dependent application. [Changelog](CHANGELOG.md)
 
 Codec changes should include wire-format golden vectors and round-trips for valid data, plus rejection cases for malformed and truncated input. See [AGENTS.md](AGENTS.md) for the full coverage expectations.
 
