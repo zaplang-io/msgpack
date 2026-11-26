@@ -2,6 +2,11 @@
 
 ## 0.1.0 (Unreleased)
 
+- Reworked the typed serde `unpack[T]` decoder (#30) to stream directly from the
+  wire into the struct (a `_Decoder` cursor + context stack; array/map headers read
+  directly, scalars decoded natively), with no intermediate `Value` DOM. On a
+  {int64; list×20; dict×5} payload this takes typed decode from ~38% slower than
+  the hand-rolled DOM path to ~21% faster. Wire format and behavior unchanged.
 - Extended the typed `pack[T]` / `unpack[T]` serde codec to `uint64` and to
   `list[T]` / `dict[str, V]` of scalar elements (arrays and maps), matching the
   serde collection breadth in zaplang-io/zap#1594.

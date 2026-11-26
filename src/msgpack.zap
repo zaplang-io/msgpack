@@ -931,117 +931,136 @@ def pack[T](T value) -> bytes:
 
 # A `serde.Deserializer` backend that serves decoded map entries positionally, in
 # field-declaration order (the order `pack` writes them). It decodes the wire via
-# the proven `unpackb` reader, then hands serde each field's value.
-# Serves decoded values positionally to the serde driver. `stack` is a stack of
-# value lists with per-list cursors: the top of the stack is the struct's field
-# values (in declaration order, as `pack` wrote them); `begin_seq` / `begin_map`
-# push a sequence's items / a map's flattened key,value run as a sub-context the
-# element reads draw from, and `end_seq` / `end_map` pop it. The wire is decoded
-# once by the proven `unpackb` reader into the `Value` DOM.
+# A STREAMING `serde.Deserializer`: it decodes straight from the wire into the
+# struct, with no intermediate `Value` DOM. It wraps a `_Decoder` cursor and a
+# context stack (0 = struct, 1 = sequence, 2 = map). In a struct context each
+# field's entry is a key + value, so a read first skips the key; in a sequence or
+# map context the reads are positional (array elements, or a dict's alternating
+# key, value). `begin_seq` / `begin_map` read only the array / map **header** (the
+# count) — the elements are then streamed one at a time — so a nested collection is
+# never materialized as a whole, and there is no second pass over a DOM. Scalars
+# reuse the proven `_Decoder._value` (one transient leaf, no container allocation).
 struct MsgpackDeserializer:
-    list[list[Value]] stack = []
-    list[int64] cursors = []
+    _Decoder dec
+    list[int64] ctx = []
 
-    def _next(self) -> Value:
-        auto top = len(self.stack) - 1
-        auto v = self.stack[top][self.cursors[top]]
-        self.cursors[top] = self.cursors[top] + 1
-        return v
+    # In a struct context the next wire item is the field key; consume and discard
+    # it so the following read lands on the value.
+    def _skip_key(self):
+        auto top = len(self.ctx) - 1
+        if top >= 0 and self.ctx[top] == 0:
+            auto _k = self.dec._value(0)
+
+    # Read an array / map header tag and return its length, without reading a body.
+    def _header_len(self, int64 fix_lo, int64 fix_hi, int64 tag16, int64 tag32, str what) -> int64:
+        auto tag = int64(self.dec._word(1))
+        if tag >= fix_lo and tag <= fix_hi:
+            return tag - fix_lo
+        if tag == tag16:
+            return int64(self.dec._word(2))
+        if tag == tag32:
+            return int64(self.dec._word(4))
+        raise FormatError("msgpack.unpack: expected " + what)
 
     def begin_struct(self):
-        pass
+        self._skip_key()
+        auto _n = self._header_len(0x80, 0x8f, 0xde, 0xdf, "a map (struct)")
+        self.ctx.append(0)
 
     def end_struct(self):
-        pass
+        self.ctx = self.ctx[0:len(self.ctx) - 1]
 
+    # Native scalar reads: parse the tag + payload straight into the Zap value,
+    # with no intermediate `Value` leaf. This is the hot path for list / dict
+    # elements, so avoiding a per-element allocation is what lets the streaming
+    # decoder beat the DOM path.
     def read_int(self, str field) -> int64:
-        match self._next():
-            case Value.Int(n):
-                return n
-            case Value.UInt(n):
-                return int64(n)
-            case _:
-                raise FormatError("msgpack.unpack: expected an integer for field '" + field + "'")
+        self._skip_key()
+        auto tag = int64(self.dec._word(1))
+        if tag <= 0x7f:
+            return tag
+        if tag >= 0xe0:
+            return tag - 256
+        if tag >= 0xcc and tag <= 0xcf:
+            return int64(self.dec._word(_integer_width(tag)))
+        if tag >= 0xd0 and tag <= 0xd3:
+            auto w = _integer_width(tag)
+            return _decoded_signed(self.dec._word(w), w)
+        raise FormatError("msgpack.unpack: expected an integer for field '" + field + "'")
 
     def read_uint(self, str field) -> uint64:
-        match self._next():
-            case Value.UInt(n):
-                return n
-            case Value.Int(n):
-                return uint64(n)
-            case _:
-                raise FormatError("msgpack.unpack: expected an unsigned integer for field '" + field + "'")
+        self._skip_key()
+        auto tag = int64(self.dec._word(1))
+        if tag <= 0x7f:
+            return uint64(tag)
+        if tag >= 0xcc and tag <= 0xcf:
+            return self.dec._word(_integer_width(tag))
+        if tag >= 0xd0 and tag <= 0xd3:
+            auto w = _integer_width(tag)
+            return uint64(_decoded_signed(self.dec._word(w), w))
+        raise FormatError("msgpack.unpack: expected an unsigned integer for field '" + field + "'")
 
     def read_float(self, str field) -> float64:
-        match self._next():
-            case Value.Float(x):
-                return x
-            case _:
-                raise FormatError("msgpack.unpack: expected a float for field '" + field + "'")
+        self._skip_key()
+        auto tag = int64(self.dec._word(1))
+        if tag == 0xca:
+            return _decoded_float(self.dec._word(4), 127, 23, 8388608.0)
+        if tag == 0xcb:
+            return _decoded_float(self.dec._word(8), 1023, 52, 4503599627370496.0)
+        raise FormatError("msgpack.unpack: expected a float for field '" + field + "'")
 
     def read_str(self, str field) -> str:
-        match self._next():
-            case Value.Str(x):
-                return x
-            case _:
-                raise FormatError("msgpack.unpack: expected a string for field '" + field + "'")
+        self._skip_key()
+        auto tag = int64(self.dec._word(1))
+        auto length = -1
+        if tag >= 0xa0 and tag <= 0xbf:
+            length = tag - 0xa0
+        elif tag >= 0xd9 and tag <= 0xdb:
+            length = int64(self.dec._word(_length_width(tag)))
+        else:
+            raise FormatError("msgpack.unpack: expected a string for field '" + field + "'")
+        return str(self.dec._payload(length))
 
     def read_bool(self, str field) -> bool:
-        match self._next():
-            case Value.Bool(b):
-                return b
-            case _:
-                raise FormatError("msgpack.unpack: expected a boolean for field '" + field + "'")
+        self._skip_key()
+        auto tag = int64(self.dec._word(1))
+        if tag == 0xc2:
+            return False
+        if tag == 0xc3:
+            return True
+        raise FormatError("msgpack.unpack: expected a boolean for field '" + field + "'")
 
     def read_bytes(self, str field) -> bytes:
-        match self._next():
-            case Value.Bin(b):
-                return b
-            case _:
-                raise FormatError("msgpack.unpack: expected binary for field '" + field + "'")
+        self._skip_key()
+        auto tag = int64(self.dec._word(1))
+        if tag >= 0xc4 and tag <= 0xc6:
+            return self.dec._payload(int64(self.dec._word(_length_width(tag))))
+        raise FormatError("msgpack.unpack: expected binary for field '" + field + "'")
 
     def begin_seq(self, str field) -> int64:
-        match self._next():
-            case Value.Array(items):
-                self.stack.append(items)
-                self.cursors.append(0)
-                return len(items)
-            case _:
-                raise FormatError("msgpack.unpack: expected an array for field '" + field + "'")
+        self._skip_key()
+        auto n = self._header_len(0x90, 0x9f, 0xdc, 0xdd, "an array for field '" + field + "'")
+        self.ctx.append(1)
+        return n
 
     def end_seq(self):
-        auto top = len(self.stack) - 1
-        self.stack = self.stack[0:top]
-        self.cursors = self.cursors[0:top]
+        self.ctx = self.ctx[0:len(self.ctx) - 1]
 
     def begin_map(self, str field) -> int64:
-        match self._next():
-            case Value.Map(ps):
-                list[Value] flat = []
-                for p in ps:
-                    flat.append(p[0])
-                    flat.append(p[1])
-                self.stack.append(flat)
-                self.cursors.append(0)
-                return len(ps)
-            case _:
-                raise FormatError("msgpack.unpack: expected a map for field '" + field + "'")
+        self._skip_key()
+        auto n = self._header_len(0x80, 0x8f, 0xde, 0xdf, "a map for field '" + field + "'")
+        self.ctx.append(2)
+        return n
 
     def end_map(self):
-        auto top = len(self.stack) - 1
-        self.stack = self.stack[0:top]
-        self.cursors = self.cursors[0:top]
+        self.ctx = self.ctx[0:len(self.ctx) - 1]
 
 # Decode MessagePack bytes into a struct `T` whose fields are scalars (int64 /
-# uint64 / float64 / str / bool / bytes) and `list` / `dict[str, V]` of scalars.
-# Both type arguments are explicit, as serde requires: `msgpack.unpack[Rec](wire)`.
+# uint64 / float64 / str / bool / bytes) and `list` / `dict[str, V]` of scalars,
+# streaming straight from the wire (no `Value` DOM). Both type arguments are
+# explicit, as serde requires: `msgpack.unpack[Rec](wire)`.
 def unpack[T](bytes data) -> T:
-    list[Value] top = []
-    match unpackb(data):
-        case Value.Map(ps):
-            for p in ps:
-                top.append(p[1])
-        case _:
-            raise FormatError("msgpack.unpack: top-level value is not a map")
-    auto d = MsgpackDeserializer([top], [0])
+    auto limits = _DecodeLimits(-1, -1, -1, -1, -1, 1024)
+    auto dec = _Decoder(data, 0, False, True, limits)
+    auto d = MsgpackDeserializer(dec, [])
     return serde.deserialize[T, MsgpackDeserializer](d)
