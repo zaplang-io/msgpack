@@ -815,11 +815,12 @@ struct Unpacker:
 # `serde.Serializer` / `serde.Deserializer` backend interfaces and reuses serde's
 # generic drivers. A struct encodes as a MessagePack **map** of field name ->
 # value, byte-conformant with the spec and interoperable with the `Value` DOM
-# codec above. This release follows serde's current surface: `int64` / `float64` /
-# `str` / `bool` / `bytes` fields and nested structs on encode; flat `int64` /
-# `float64` / `str` / `bool` / `bytes` structs on decode (serde's nested/enum/
-# collection decode is a later addition, tracked in zaplang-io/zap#1561 and the
-# serde breadth follow-up). `float64` encodes as binary64; `bytes` as a bin header.
+# codec above. This release follows serde's current surface: scalars (`int64` /
+# `uint64` / `float64` / `str` / `bool` / `bytes`), nested structs on encode, and
+# `list[T]` / `dict[str, V]` of scalar elements (both directions). `float64`
+# encodes as binary64, `bytes` as a bin header, `list` as an array, `dict` as a
+# map, `uint64` as an unsigned int. Serde's nested-struct decode and enum / generic
+# decode remain later additions (tracked in zaplang-io/zap#1561).
 
 # A `serde.Serializer` backend that writes MessagePack map bytes. Because serde's
 # `begin_struct` carries no field count (a map16/fixmap header needs the count up
@@ -829,64 +830,97 @@ struct MsgpackSerializer:
     list[list[bytes]] frames = []
     list[int64] counts = []
     list[str] frame_keys = []
+    # Per-frame kind: 0 = struct (map keyed by field names), 1 = sequence (array),
+    # 2 = map (dict; emits arrive as alternating key, value). Each frame buffers so
+    # the array/map header can be backfilled at `end_*` (serde emits no count up front).
+    list[int64] kinds = []
     str pending_key = ""
     bytes result = bytes([])
 
-    def begin_struct(self):
+    def _push(self, int64 kind):
         self.frames.append([])
         self.counts.append(0)
         self.frame_keys.append(self.pending_key)
+        self.kinds.append(kind)
         self.pending_key = ""
+
+    def begin_struct(self):
+        self._push(0)
+
+    def begin_seq(self):
+        self._push(1)
+
+    def begin_map(self):
+        self._push(2)
 
     def field_name(self, str name):
         self.pending_key = name
 
-    def _entry(self, bytes value_bytes):
+    # Append one encoded value to the current frame. In a struct frame the value is
+    # keyed by the pending field name; in a sequence or map frame it is positional.
+    def _emit(self, bytes value_bytes):
         auto top = len(self.frames) - 1
-        auto kb = bytes(self.pending_key)
-        self.frames[top].append(_text_header(len(kb), True) + kb)
+        if self.kinds[top] == 0:
+            auto kb = bytes(self.pending_key)
+            self.frames[top].append(_text_header(len(kb), True) + kb)
         self.frames[top].append(value_bytes)
         self.counts[top] = self.counts[top] + 1
 
     def emit_int(self, int64 v):
-        self._entry(_integer(v))
+        self._emit(_integer(v))
+
+    def emit_uint(self, uint64 v):
+        self._emit(_unsigned(v))
 
     def emit_float(self, float64 v):
-        self._entry(_float(v, False))
+        self._emit(_float(v, False))
 
     def emit_str(self, str v):
         auto payload = bytes(v)
-        self._entry(_text_header(len(payload), True) + payload)
+        self._emit(_text_header(len(payload), True) + payload)
 
     def emit_bool(self, bool v):
         if v:
-            self._entry(bytes([0xc3]))
+            self._emit(bytes([0xc3]))
         else:
-            self._entry(bytes([0xc2]))
+            self._emit(bytes([0xc2]))
 
     def emit_bytes(self, bytes v):
-        self._entry(_length_header(len(v), 0, -1, 0xc4, 0xc5, 0xc6) + v)
+        self._emit(_length_header(len(v), 0, -1, 0xc4, 0xc5, 0xc6) + v)
 
-    def end_struct(self):
+    # Pop the current frame, prepend its `header`, and attach the finished bytes to
+    # the parent (keyed by this frame's field name) or to `result` at the top level.
+    def _finish(self, bytes header, int64 entries):
         auto top = len(self.frames) - 1
-        auto count = self.counts[top]
         auto body = self.frames[top]
+        bytes framebytes = header
+        if len(body) > 0:
+            framebytes = header + _join_bytes(body, 0, len(body))
+        auto fkey = self.frame_keys[top]
         self.frames = self.frames[0:top]
         self.counts = self.counts[0:top]
-        auto fkey = self.frame_keys[top]
         self.frame_keys = self.frame_keys[0:top]
-        auto header = _length_header(count, 0x80, 15, -1, 0xde, 0xdf)
-        bytes mapbytes = header
-        if len(body) > 0:
-            mapbytes = header + _join_bytes(body, 0, len(body))
+        self.kinds = self.kinds[0:top]
         if len(self.frames) == 0:
-            self.result = mapbytes
+            self.result = framebytes
         else:
             auto parent = len(self.frames) - 1
             auto kb = bytes(fkey)
             self.frames[parent].append(_text_header(len(kb), True) + kb)
-            self.frames[parent].append(mapbytes)
+            self.frames[parent].append(framebytes)
             self.counts[parent] = self.counts[parent] + 1
+
+    def end_struct(self):
+        auto n = self.counts[len(self.counts) - 1]
+        self._finish(_length_header(n, 0x80, 15, -1, 0xde, 0xdf), n)
+
+    def end_seq(self):
+        auto n = self.counts[len(self.counts) - 1]
+        self._finish(_length_header(n, 0x90, 15, -1, 0xdc, 0xdd), n)
+
+    def end_map(self):
+        auto pairs = self.counts[len(self.counts) - 1] // 2
+        self._finish(_length_header(pairs, 0x80, 15, -1, 0xde, 0xdf), pairs)
 
 # Serialize any struct `T` to MessagePack bytes (a map of field -> value) through
 # the serde driver. Example: `auto wire = msgpack.pack(record)`.
@@ -898,24 +932,45 @@ def pack[T](T value) -> bytes:
 # A `serde.Deserializer` backend that serves decoded map entries positionally, in
 # field-declaration order (the order `pack` writes them). It decodes the wire via
 # the proven `unpackb` reader, then hands serde each field's value.
+# Serves decoded values positionally to the serde driver. `stack` is a stack of
+# value lists with per-list cursors: the top of the stack is the struct's field
+# values (in declaration order, as `pack` wrote them); `begin_seq` / `begin_map`
+# push a sequence's items / a map's flattened key,value run as a sub-context the
+# element reads draw from, and `end_seq` / `end_map` pop it. The wire is decoded
+# once by the proven `unpackb` reader into the `Value` DOM.
 struct MsgpackDeserializer:
-    list[(Value, Value)] pairs = []
-    int64 pos = 0
+    list[list[Value]] stack = []
+    list[int64] cursors = []
+
+    def _next(self) -> Value:
+        auto top = len(self.stack) - 1
+        auto v = self.stack[top][self.cursors[top]]
+        self.cursors[top] = self.cursors[top] + 1
+        return v
 
     def begin_struct(self):
         pass
 
-    def _next(self) -> Value:
-        auto v = self.pairs[self.pos][1]
-        self.pos = self.pos + 1
-        return v
+    def end_struct(self):
+        pass
 
     def read_int(self, str field) -> int64:
         match self._next():
             case Value.Int(n):
                 return n
+            case Value.UInt(n):
+                return int64(n)
             case _:
                 raise FormatError("msgpack.unpack: expected an integer for field '" + field + "'")
+
+    def read_uint(self, str field) -> uint64:
+        match self._next():
+            case Value.UInt(n):
+                return n
+            case Value.Int(n):
+                return uint64(n)
+            case _:
+                raise FormatError("msgpack.unpack: expected an unsigned integer for field '" + field + "'")
 
     def read_float(self, str field) -> float64:
         match self._next():
@@ -945,18 +1000,48 @@ struct MsgpackDeserializer:
             case _:
                 raise FormatError("msgpack.unpack: expected binary for field '" + field + "'")
 
-    def end_struct(self):
-        pass
+    def begin_seq(self, str field) -> int64:
+        match self._next():
+            case Value.Array(items):
+                self.stack.append(items)
+                self.cursors.append(0)
+                return len(items)
+            case _:
+                raise FormatError("msgpack.unpack: expected an array for field '" + field + "'")
 
-# Decode MessagePack bytes into a flat struct `T` (int64 / float64 / str / bool /
-# bytes fields).
+    def end_seq(self):
+        auto top = len(self.stack) - 1
+        self.stack = self.stack[0:top]
+        self.cursors = self.cursors[0:top]
+
+    def begin_map(self, str field) -> int64:
+        match self._next():
+            case Value.Map(ps):
+                list[Value] flat = []
+                for p in ps:
+                    flat.append(p[0])
+                    flat.append(p[1])
+                self.stack.append(flat)
+                self.cursors.append(0)
+                return len(ps)
+            case _:
+                raise FormatError("msgpack.unpack: expected a map for field '" + field + "'")
+
+    def end_map(self):
+        auto top = len(self.stack) - 1
+        self.stack = self.stack[0:top]
+        self.cursors = self.cursors[0:top]
+
+# Decode MessagePack bytes into a struct `T` whose fields are scalars (int64 /
+# uint64 / float64 / str / bool / bytes) and `list` / `dict[str, V]` of scalars.
 # Both type arguments are explicit, as serde requires: `msgpack.unpack[Rec](wire)`.
 def unpack[T](bytes data) -> T:
-    list[(Value, Value)] pairs = []
+    list[Value] top = []
     match unpackb(data):
         case Value.Map(ps):
-            pairs = ps
+            for p in ps:
+                top.append(p[1])
         case _:
             raise FormatError("msgpack.unpack: top-level value is not a map")
-    auto d = MsgpackDeserializer(pairs, 0)
+    auto d = MsgpackDeserializer([top], [0])
     return serde.deserialize[T, MsgpackDeserializer](d)

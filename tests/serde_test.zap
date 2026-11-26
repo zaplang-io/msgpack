@@ -89,3 +89,29 @@ def test_float_and_bytes_match_the_dom():
         (Value.Str("blob"), Value.Bin(bytes([1, 2, 255]))),
     ])
     _ok(pack(r) == packb(dom), "float64 + bytes pack equals the hand-built DOM")
+
+struct SerdeColl:
+    int64 id
+    list[int64] nums
+    dict[str, int64] tags
+    uint64 big
+
+@test
+def test_collections_round_trip():
+    auto r = SerdeColl(7, [10, 20, 30], {"k": 9}, uint64(42))
+    auto r2 = unpack[SerdeColl](pack(r))
+    _ok(r2.id == 7, "id")
+    _ok(len(r2.nums) == 3 and r2.nums[2] == 30, "list[int64] round-trip")
+    _ok(len(r2.tags) == 1 and r2.tags["k"] == 9, "dict[str,int64] round-trip")
+    _ok(r2.big == uint64(42), "uint64 round-trip")
+
+@test
+def test_collections_match_the_dom():
+    auto r = SerdeColl(7, [10, 20], {"k": 9}, uint64(42))
+    auto dom = Value.Map([
+        (Value.Str("id"), Value.Int(7)),
+        (Value.Str("nums"), Value.Array([Value.Int(10), Value.Int(20)])),
+        (Value.Str("tags"), Value.Map([(Value.Str("k"), Value.Int(9))])),
+        (Value.Str("big"), Value.UInt(uint64(42))),
+    ])
+    _ok(pack(r) == packb(dom), "list + dict + uint64 pack equals the hand-built DOM")

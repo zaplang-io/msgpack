@@ -2,6 +2,9 @@
 
 ## 0.1.0 (Unreleased)
 
+- Extended the typed `pack[T]` / `unpack[T]` serde codec to `uint64` and to
+  `list[T]` / `dict[str, V]` of scalar elements (arrays and maps), matching the
+  serde collection breadth in zaplang-io/zap#1594.
 - Extended the typed `pack[T]` / `unpack[T]` serde codec to `float64` and `bytes`
   struct fields (binary64 floats, `bin` payloads), matching the serde breadth in
   zaplang-io/zap#1574.
