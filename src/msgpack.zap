@@ -1,5 +1,6 @@
 import datetime
 import math
+import serde
 
 # The application code and payload of a MessagePack extension.
 struct ExtType:
@@ -250,33 +251,42 @@ def packb_with_default[T](T value, fn(T) -> ExtType default) -> bytes:
     return packb(Value.Ext(extension))
 
 # Raised when the input ends before a complete value is available.
+@exception
 struct OutOfData:
     str message
 
 # Raised when bytes remain after the first complete value.
+@exception
 struct ExtraData:
     str message
 
 # Raised for an invalid tag, string payload, or strict map key.
+@exception
 struct FormatError:
     str message
 
 # Raised when decoding would exceed the nesting limit.
+@exception
 struct StackError:
     str message
 
+@exception
 struct StrLimitError:
     str message
 
+@exception
 struct BinLimitError:
     str message
 
+@exception
 struct ArrayLimitError:
     str message
 
+@exception
 struct MapLimitError:
     str message
 
+@exception
 struct ExtLimitError:
     str message
 
@@ -566,6 +576,7 @@ struct Packer:
         return packb(value, use_single_float=self.use_single_float, use_bin_type=self.use_bin_type)
 
 # Raised when a feed would exceed the unread-byte budget.
+@exception
 struct BufferFull:
     str message
 
@@ -795,3 +806,135 @@ struct Unpacker:
             return self.unpack()
         except OutOfData:
             raise StopIteration
+
+
+# ---------------------------------------------------------------------------
+# serde integration (E6.3, zaplang-io/zap#1552): typed `pack` / `unpack` for any
+# struct via the bundled `serde` foundation (zaplang-io/zap#1570), with NO
+# per-codec compiler support — msgpack is a pure library that implements the
+# `serde.Serializer` / `serde.Deserializer` backend interfaces and reuses serde's
+# generic drivers. A struct encodes as a MessagePack **map** of field name ->
+# value, byte-conformant with the spec and interoperable with the `Value` DOM
+# codec above. This release follows serde's current surface: `int64` / `str` /
+# `bool` fields and nested structs on encode; flat `int64` / `str` / `bool`
+# structs on decode (serde's nested/enum/collection decode is a later addition,
+# tracked in zaplang-io/zap#1561 and the serde breadth follow-up).
+
+# A `serde.Serializer` backend that writes MessagePack map bytes. Because serde's
+# `begin_struct` carries no field count (a map16/fixmap header needs the count up
+# front), entries are buffered per struct in a frame stack and the header is
+# backfilled at `end_struct` — a standard streaming technique.
+struct MsgpackSerializer:
+    list[list[bytes]] frames = []
+    list[int64] counts = []
+    list[str] frame_keys = []
+    str pending_key = ""
+    bytes result = bytes([])
+
+    def begin_struct(self):
+        self.frames.append([])
+        self.counts.append(0)
+        self.frame_keys.append(self.pending_key)
+        self.pending_key = ""
+
+    def field_name(self, str name):
+        self.pending_key = name
+
+    def _entry(self, bytes value_bytes):
+        auto top = len(self.frames) - 1
+        auto kb = bytes(self.pending_key)
+        self.frames[top].append(_text_header(len(kb), True) + kb)
+        self.frames[top].append(value_bytes)
+        self.counts[top] = self.counts[top] + 1
+
+    def emit_int(self, int64 v):
+        self._entry(_integer(v))
+
+    def emit_str(self, str v):
+        auto payload = bytes(v)
+        self._entry(_text_header(len(payload), True) + payload)
+
+    def emit_bool(self, bool v):
+        if v:
+            self._entry(bytes([0xc3]))
+        else:
+            self._entry(bytes([0xc2]))
+
+    def end_struct(self):
+        auto top = len(self.frames) - 1
+        auto count = self.counts[top]
+        auto body = self.frames[top]
+        self.frames = self.frames[0:top]
+        self.counts = self.counts[0:top]
+        auto fkey = self.frame_keys[top]
+        self.frame_keys = self.frame_keys[0:top]
+        auto header = _length_header(count, 0x80, 15, -1, 0xde, 0xdf)
+        bytes mapbytes = header
+        if len(body) > 0:
+            mapbytes = header + _join_bytes(body, 0, len(body))
+        if len(self.frames) == 0:
+            self.result = mapbytes
+        else:
+            auto parent = len(self.frames) - 1
+            auto kb = bytes(fkey)
+            self.frames[parent].append(_text_header(len(kb), True) + kb)
+            self.frames[parent].append(mapbytes)
+            self.counts[parent] = self.counts[parent] + 1
+
+# Serialize any struct `T` to MessagePack bytes (a map of field -> value) through
+# the serde driver. Example: `auto wire = msgpack.pack(record)`.
+def pack[T](T value) -> bytes:
+    auto s = MsgpackSerializer()
+    serde.serialize(value, s)
+    return s.result
+
+# A `serde.Deserializer` backend that serves decoded map entries positionally, in
+# field-declaration order (the order `pack` writes them). It decodes the wire via
+# the proven `unpackb` reader, then hands serde each field's value.
+struct MsgpackDeserializer:
+    list[(Value, Value)] pairs = []
+    int64 pos = 0
+
+    def begin_struct(self):
+        pass
+
+    def _next(self) -> Value:
+        auto v = self.pairs[self.pos][1]
+        self.pos = self.pos + 1
+        return v
+
+    def read_int(self, str field) -> int64:
+        match self._next():
+            case Value.Int(n):
+                return n
+            case _:
+                raise FormatError("msgpack.unpack: expected an integer for field '" + field + "'")
+
+    def read_str(self, str field) -> str:
+        match self._next():
+            case Value.Str(x):
+                return x
+            case _:
+                raise FormatError("msgpack.unpack: expected a string for field '" + field + "'")
+
+    def read_bool(self, str field) -> bool:
+        match self._next():
+            case Value.Bool(b):
+                return b
+            case _:
+                raise FormatError("msgpack.unpack: expected a boolean for field '" + field + "'")
+
+    def end_struct(self):
+        pass
+
+# Decode MessagePack bytes into a flat struct `T` (int64 / str / bool fields).
+# Both type arguments are explicit, as serde requires: `msgpack.unpack[Rec](wire)`.
+def unpack[T](bytes data) -> T:
+    list[(Value, Value)] pairs = []
+    match unpackb(data):
+        case Value.Map(ps):
+            pairs = ps
+        case _:
+            raise FormatError("msgpack.unpack: top-level value is not a map")
+    auto d = MsgpackDeserializer(pairs, 0)
+    return serde.deserialize[T, MsgpackDeserializer](d)

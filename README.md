@@ -157,3 +157,28 @@ Codec changes should include wire-format golden vectors and round-trips for vali
 ## Development
 
 Read **[AGENTS.md](AGENTS.md)** before contributing — it covers the msgpack-python-parity rule, the one-issue-one-PR + **CI-per-PR** flow, how design decisions are recorded in **[DECISIONS.md](DECISIONS.md)**, and the rule for reporting core Zap defects upstream in `zaplang-io/zap`.
+
+## Typed structs via serde
+
+Serialize any struct directly — no hand-built `Value` — through Zap's bundled
+`serde` foundation. `pack` encodes a struct as a MessagePack map of field name →
+value; `unpack[T]` decodes one back. The wire bytes are byte-identical to the
+equivalent `Value.Map(...)`, so this interoperates with `packb` / `unpackb`.
+
+```zap
+import msgpack
+
+struct Record:
+    int64 id
+    str name
+    bool active
+
+def main():
+    auto wire = msgpack.pack(Record(7, "widget", True))
+    auto back = msgpack.unpack[Record](wire)   # explicit type required
+    assert back.name == "widget"
+```
+
+This release supports `int64` / `str` / `bool` fields and nested structs on
+encode, and flat `int64` / `str` / `bool` structs on decode; wider field types and
+a DOM-free decode track the serde breadth work. See [DECISIONS.md](DECISIONS.md).
