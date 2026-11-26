@@ -115,3 +115,114 @@ def test_collections_match_the_dom():
         (Value.Str("big"), Value.UInt(uint64(42))),
     ])
     _ok(pack(r) == packb(dom), "list + dict + uint64 pack equals the hand-built DOM")
+
+struct SerdeOpt:
+    int64 id
+    Optional[int64] maybe
+    Optional[str] note
+
+@test
+def test_optional_some_and_none_round_trip():
+    auto r = SerdeOpt(1, Optional.Some(9), Optional.None)
+    auto r2 = unpack[SerdeOpt](pack(r))
+    _ok(r2.id == 1, "id")
+    bool some_ok = False
+    match r2.maybe:
+        case Optional.Some(x):
+            some_ok = x == 9
+        case Optional.None:
+            some_ok = False
+    _ok(some_ok, "Optional[int64] Some round-trip")
+    bool none_ok = False
+    match r2.note:
+        case Optional.Some(y):
+            none_ok = False
+        case Optional.None:
+            none_ok = True
+    _ok(none_ok, "Optional[str] None round-trip")
+
+@test
+def test_optional_both_some_round_trip():
+    # Two adjacent Some values: the key-skip suppression must reset after each,
+    # so the second Optional's key is still consumed correctly.
+    auto r = SerdeOpt(3, Optional.Some(-5), Optional.Some("hi"))
+    auto r2 = unpack[SerdeOpt](pack(r))
+    _ok(r2.id == 3, "id")
+    bool a_ok = False
+    match r2.maybe:
+        case Optional.Some(x):
+            a_ok = x == -5
+        case Optional.None:
+            a_ok = False
+    _ok(a_ok, "first Optional Some")
+    bool b_ok = False
+    match r2.note:
+        case Optional.Some(y):
+            b_ok = y == "hi"
+        case Optional.None:
+            b_ok = False
+    _ok(b_ok, "second Optional Some (suppression reset)")
+
+@test
+def test_optional_matches_the_dom():
+    auto r = SerdeOpt(1, Optional.Some(9), Optional.None)
+    auto dom = Value.Map([
+        (Value.Str("id"), Value.Int(1)),
+        (Value.Str("maybe"), Value.Int(9)),
+        (Value.Str("note"), Value.Nil),
+    ])
+    _ok(pack(r) == packb(dom), "Optional Some=inner / None=nil packs byte-identical to the DOM")
+
+enum SerdeStatus:
+    Active
+    Paused
+    Done
+
+@test
+def test_enum_constant_variant_round_trips():
+    auto s = unpack[SerdeStatus](pack(SerdeStatus.Paused))
+    bool is_paused = False
+    match s:
+        case SerdeStatus.Active:
+            is_paused = False
+        case SerdeStatus.Paused:
+            is_paused = True
+        case SerdeStatus.Done:
+            is_paused = False
+    _ok(is_paused, "enum constant variant round-trip")
+
+@test
+def test_enum_round_trips_every_variant():
+    auto a = unpack[SerdeStatus](pack(SerdeStatus.Active))
+    bool a_ok = False
+    match a:
+        case SerdeStatus.Active:
+            a_ok = True
+        case SerdeStatus.Paused:
+            a_ok = False
+        case SerdeStatus.Done:
+            a_ok = False
+    _ok(a_ok, "Active round-trip")
+    auto d = unpack[SerdeStatus](pack(SerdeStatus.Done))
+    bool d_ok = False
+    match d:
+        case SerdeStatus.Active:
+            d_ok = False
+        case SerdeStatus.Paused:
+            d_ok = False
+        case SerdeStatus.Done:
+            d_ok = True
+    _ok(d_ok, "Done round-trip")
+
+@test
+def test_enum_encodes_as_its_variant_name_string():
+    _ok(pack(SerdeStatus.Paused) == packb(Value.Str("Paused")), "enum encodes as a MessagePack string of the variant name")
+
+@test
+def test_unpack_rejects_an_unknown_variant_tag():
+    bool raised = False
+    try:
+        auto _s = unpack[SerdeStatus](packb(Value.Str("Nope")))
+    except ValueError:
+        raised = True
+    _ok(raised, "an unknown enum variant tag raises ValueError")

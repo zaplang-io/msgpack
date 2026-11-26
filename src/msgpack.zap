@@ -816,11 +816,14 @@ struct Unpacker:
 # generic drivers. A struct encodes as a MessagePack **map** of field name ->
 # value, byte-conformant with the spec and interoperable with the `Value` DOM
 # codec above. This release follows serde's current surface: scalars (`int64` /
-# `uint64` / `float64` / `str` / `bool` / `bytes`), nested structs on encode, and
-# `list[T]` / `dict[str, V]` of scalar elements (both directions). `float64`
-# encodes as binary64, `bytes` as a bin header, `list` as an array, `dict` as a
-# map, `uint64` as an unsigned int. Serde's nested-struct decode and enum / generic
-# decode remain later additions (tracked in zaplang-io/zap#1561).
+# `uint64` / `float64` / `str` / `bool` / `bytes`), nested structs on encode,
+# `list[T]` / `dict[str, V]` of scalar elements, `Optional[T]` of a scalar (both
+# directions), and `enum` types (encode: all variants; decode: constant/payload-free
+# variants). `float64` encodes as binary64, `bytes` as a bin header, `list` as an
+# array, `dict` as a map, `uint64` as an unsigned int, `Optional` None as nil, an
+# enum variant tag as its name (a string). Serde's nested-struct decode and
+# payload-carrying enum decode remain later additions (tracked in
+# zaplang-io/zap#1561 / zap#1606).
 
 # A `serde.Serializer` backend that writes MessagePack map bytes. Because serde's
 # `begin_struct` carries no field count (a map16/fixmap header needs the count up
@@ -858,7 +861,12 @@ struct MsgpackSerializer:
 
     # Append one encoded value to the current frame. In a struct frame the value is
     # keyed by the pending field name; in a sequence or map frame it is positional.
+    # With no frame open (a top-level enum — serde opens no struct frame for one),
+    # the value is written straight to `result`.
     def _emit(self, bytes value_bytes):
+        if len(self.frames) == 0:
+            self.result = self.result + value_bytes
+            return
         auto top = len(self.frames) - 1
         if self.kinds[top] == 0:
             auto kb = bytes(self.pending_key)
@@ -887,6 +895,17 @@ struct MsgpackSerializer:
 
     def emit_bytes(self, bytes v):
         self._emit(_length_header(len(v), 0, -1, 0xc4, 0xc5, 0xc6) + v)
+
+    # `Optional` None encodes as the MessagePack nil byte; a `Some` emits its inner
+    # value directly (serde calls the matching `emit_*`).
+    def emit_nil(self):
+        self._emit(bytes([0xc0]))
+
+    # An enum variant tag encodes as its name (a MessagePack string); any payload
+    # values follow via the matching `emit_*`.
+    def emit_variant(self, str name):
+        auto payload = bytes(name)
+        self._emit(_text_header(len(payload), True) + payload)
 
     # Pop the current frame, prepend its `header`, and attach the finished bytes to
     # the parent (keyed by this frame's field name) or to `result` at the top level.
@@ -940,10 +959,18 @@ def pack[T](T value) -> bytes:
 struct MsgpackDeserializer:
     _Decoder dec
     list[int64] ctx = []
+    # `begin_optional` consumes the field key itself (to peek the value for nil),
+    # so the following `read_*` of a `Some` value must NOT skip a key again. This
+    # one-shot flag suppresses exactly that next key-skip.
+    bool suppress_key = False
 
     # In a struct context the next wire item is the field key; consume and discard
-    # it so the following read lands on the value.
+    # it so the following read lands on the value. A pending suppression (set by
+    # `begin_optional`, which already consumed the key) is honored once.
     def _skip_key(self):
+        if self.suppress_key:
+            self.suppress_key = False
+            return
         auto top = len(self.ctx) - 1
         if top >= 0 and self.ctx[top] == 0:
             auto _k = self.dec._value(0)
@@ -1033,6 +1060,33 @@ struct MsgpackDeserializer:
         if tag >= 0xc4 and tag <= 0xc6:
             return self.dec._payload(int64(self.dec._word(_length_width(tag))))
         raise FormatError("msgpack.unpack: expected binary for field '" + field + "'")
+
+    # `Optional`: skip the field key, then peek the value tag. A nil (0xc0) is a
+    # `None` — consume it and return False. Otherwise it is a `Some`: return True
+    # and leave the value to the following `read_*`, suppressing that read's key
+    # skip (this call already consumed the key).
+    def begin_optional(self, str field) -> bool:
+        self._skip_key()
+        self.dec._require(1)
+        if int64(self.dec.data[self.dec.pos]) == 0xc0:
+            self.dec.pos = self.dec.pos + 1
+            return False
+        self.suppress_key = True
+        return True
+
+    # Read an enum variant tag: a MessagePack string. An enum decodes at the top
+    # level (no struct context), so no key precedes it.
+    def read_variant(self) -> str:
+        self._skip_key()
+        auto tag = int64(self.dec._word(1))
+        auto length = -1
+        if tag >= 0xa0 and tag <= 0xbf:
+            length = tag - 0xa0
+        elif tag >= 0xd9 and tag <= 0xdb:
+            length = int64(self.dec._word(_length_width(tag)))
+        else:
+            raise FormatError("msgpack.unpack: expected an enum variant tag (string)")
+        return str(self.dec._payload(length))
 
     def begin_seq(self, str field) -> int64:
         self._skip_key()
