@@ -53,45 +53,74 @@ def _append_word(list[int64] octets, uint64 word, int64 width):
         octets.append(int64((word >> uint64(shift)) & uint64(255)))
         shift = shift - 8
 
-def _tagged_word(int64 tag, uint64 word, int64 width) -> bytes:
-    list[int64] octets = [tag]
-    _append_word(octets, word, width)
-    return bytes(octets)
+# The `_put_*` helpers append MessagePack bytes straight into a growable
+# `list[int64]` output buffer (the streaming `MsgpackSerializer`'s hot path), so a
+# whole record serializes into ONE buffer with no per-value `bytes` allocation. The
+# `bytes`-returning forms below delegate to them and stay the API the `Value` DOM
+# codec uses, so both paths emit byte-identical output.
+def _put_unsigned(list[int64] buf, uint64 value):
+    if value <= uint64(127):
+        buf.append(int64(value))
+    elif value <= uint64(255):
+        buf.append(0xcc)
+        _append_word(buf, value, 1)
+    elif value <= uint64(65535):
+        buf.append(0xcd)
+        _append_word(buf, value, 2)
+    elif value <= uint64(4294967295):
+        buf.append(0xce)
+        _append_word(buf, value, 4)
+    else:
+        buf.append(0xcf)
+        _append_word(buf, value, 8)
 
 def _unsigned(uint64 value) -> bytes:
-    if value <= uint64(127):
-        return bytes([int64(value)])
-    if value <= uint64(255):
-        return _tagged_word(0xcc, value, 1)
-    if value <= uint64(65535):
-        return _tagged_word(0xcd, value, 2)
-    if value <= uint64(4294967295):
-        return _tagged_word(0xce, value, 4)
-    return _tagged_word(0xcf, value, 8)
+    list[int64] octets = []
+    _put_unsigned(octets, value)
+    return bytes(octets)
+
+def _put_integer(list[int64] buf, int64 value):
+    if value >= 0:
+        _put_unsigned(buf, uint64(value))
+    elif value >= -32:
+        buf.append(value + 256)
+    elif value >= -128:
+        buf.append(0xd0)
+        _append_word(buf, uint64(value), 1)
+    elif value >= -32768:
+        buf.append(0xd1)
+        _append_word(buf, uint64(value), 2)
+    elif value >= -2147483648:
+        buf.append(0xd2)
+        _append_word(buf, uint64(value), 4)
+    else:
+        buf.append(0xd3)
+        _append_word(buf, uint64(value), 8)
 
 def _integer(int64 value) -> bytes:
-    if value >= 0:
-        return _unsigned(uint64(value))
-    if value >= -32:
-        return bytes([value + 256])
-    if value >= -128:
-        return _tagged_word(0xd0, uint64(value), 1)
-    if value >= -32768:
-        return _tagged_word(0xd1, uint64(value), 2)
-    if value >= -2147483648:
-        return _tagged_word(0xd2, uint64(value), 4)
-    return _tagged_word(0xd3, uint64(value), 8)
+    list[int64] octets = []
+    _put_integer(octets, value)
+    return bytes(octets)
+
+def _put_length_header(list[int64] buf, int64 length, int64 fix_tag, int64 fix_max, int64 tag8, int64 tag16, int64 tag32):
+    if length <= fix_max:
+        buf.append(fix_tag + length)
+    elif tag8 >= 0 and length <= 255:
+        buf.append(tag8)
+        _append_word(buf, uint64(length), 1)
+    elif length <= 65535:
+        buf.append(tag16)
+        _append_word(buf, uint64(length), 2)
+    elif length <= 4294967295:
+        buf.append(tag32)
+        _append_word(buf, uint64(length), 4)
+    else:
+        raise ValueError("MessagePack length exceeds 32 bits")
 
 def _length_header(int64 length, int64 fix_tag, int64 fix_max, int64 tag8, int64 tag16, int64 tag32) -> bytes:
-    if length <= fix_max:
-        return bytes([fix_tag + length])
-    if tag8 >= 0 and length <= 255:
-        return _tagged_word(tag8, uint64(length), 1)
-    if length <= 65535:
-        return _tagged_word(tag16, uint64(length), 2)
-    if length <= 4294967295:
-        return _tagged_word(tag32, uint64(length), 4)
-    raise ValueError("MessagePack length exceeds 32 bits")
+    list[int64] octets = []
+    _put_length_header(octets, length, fix_tag, fix_max, tag8, tag16, tag32)
+    return bytes(octets)
 
 def _extension_header(ExtType extension) -> bytes:
     auto code = extension.code
@@ -173,16 +202,35 @@ def _float_bits(float64 value, int64 bias, int64 fraction_bits, float64 fraction
         biased_exponent = biased_exponent + 1
     return sign | (uint64(biased_exponent) << uint64(fraction_bits)) | uint64(fraction)
 
-def _float(float64 value, bool use_single_float) -> bytes:
+def _put_float(list[int64] buf, float64 value, bool use_single_float):
     if use_single_float:
-        return _tagged_word(0xca, _float_bits(value, 127, 23, 8388608.0), 4)
-    return _tagged_word(0xcb, _float_bits(value, 1023, 52, 4503599627370496.0), 8)
+        buf.append(0xca)
+        _append_word(buf, _float_bits(value, 127, 23, 8388608.0), 4)
+    else:
+        buf.append(0xcb)
+        _append_word(buf, _float_bits(value, 1023, 52, 4503599627370496.0), 8)
 
-def _text_header(int64 length, bool use_bin_type) -> bytes:
+def _float(float64 value, bool use_single_float) -> bytes:
+    list[int64] octets = []
+    _put_float(octets, value, use_single_float)
+    return bytes(octets)
+
+def _put_text_header(list[int64] buf, int64 length, bool use_bin_type):
     auto tag8 = -1
     if use_bin_type:
         tag8 = 0xd9
-    return _length_header(length, 0xa0, 31, tag8, 0xda, 0xdb)
+    _put_length_header(buf, length, 0xa0, 31, tag8, 0xda, 0xdb)
+
+def _text_header(int64 length, bool use_bin_type) -> bytes:
+    list[int64] octets = []
+    _put_text_header(octets, length, use_bin_type)
+    return bytes(octets)
+
+# Append a raw byte payload (string / binary contents) into the buffer.
+def _put_payload(list[int64] buf, bytes payload):
+    auto n = len(payload)
+    for i in range(n):
+        buf.append(int64(payload[i]))
 
 def _pack(Value value, bool use_single_float, bool use_bin_type, int64 depth, list[bytes] parts):
     if depth > 1024:
@@ -825,125 +873,139 @@ struct Unpacker:
 # payload-carrying enum decode remain later additions (tracked in
 # zaplang-io/zap#1561 / zap#1606).
 
-# A `serde.Serializer` backend that writes MessagePack map bytes. Because serde's
-# `begin_struct` carries no field count (a map16/fixmap header needs the count up
-# front), entries are buffered per struct in a frame stack and the header is
-# backfilled at `end_struct` — a standard streaming technique.
+# A `serde.Serializer` backend that writes MessagePack bytes into ONE growable
+# buffer. serde's `begin_struct` / `begin_seq` / `begin_map` carry no element count
+# (a fixmap / map16 / map32 header needs it up front), so at each `begin_*` the
+# serializer reserves a single placeholder byte and records its offset; `end_*`
+# back-patches it. The common case — a container of <= 15 entries — patches the
+# one reserved byte in place (a fixmap / fixarray tag), with NO buffer shift; only a
+# container larger than 15 entries splices in a 3- or 5-byte header (rare). This
+# replaces the old per-frame `list[list[bytes]]` + join, so a whole record
+# serializes with one buffer and no per-value `bytes` allocation.
 struct MsgpackSerializer:
-    list[list[bytes]] frames = []
-    list[int64] counts = []
-    list[str] frame_keys = []
-    # Per-frame kind: 0 = struct (map keyed by field names), 1 = sequence (array),
-    # 2 = map (dict; emits arrive as alternating key, value). Each frame buffers so
-    # the array/map header can be backfilled at `end_*` (serde emits no count up front).
-    list[int64] kinds = []
+    list[int64] buf = []
+    # Open-container stack (parallel lists): the offset of each container's reserved
+    # 1-byte header placeholder, its running entry count, and its kind
+    # (0 = struct map, 1 = sequence/array, 2 = dict map — dict emits arrive as
+    # alternating key, value, so its entry count is twice the pair count).
+    list[int64] frame_off = []
+    list[int64] frame_count = []
+    list[int64] frame_kind = []
     str pending_key = ""
-    bytes result = bytes([])
-
-    def _push(self, int64 kind):
-        self.frames.append([])
-        self.counts.append(0)
-        self.frame_keys.append(self.pending_key)
-        self.kinds.append(kind)
-        self.pending_key = ""
-
-    def begin_struct(self):
-        self._push(0)
-
-    def begin_seq(self):
-        self._push(1)
-
-    def begin_map(self):
-        self._push(2)
 
     def field_name(self, str name):
         self.pending_key = name
 
-    # Append one encoded value to the current frame. In a struct frame the value is
-    # keyed by the pending field name; in a sequence or map frame it is positional.
-    # With no frame open (a top-level enum — serde opens no struct frame for one),
-    # the value is written straight to `result`.
-    def _emit(self, bytes value_bytes):
-        if len(self.frames) == 0:
-            self.result = self.result + value_bytes
-            return
-        auto top = len(self.frames) - 1
-        if self.kinds[top] == 0:
-            auto kb = bytes(self.pending_key)
-            self.frames[top].append(_text_header(len(kb), True) + kb)
-        self.frames[top].append(value_bytes)
-        self.counts[top] = self.counts[top] + 1
+    # Called before every value (scalar or nested container). In a struct frame the
+    # value is preceded by its field-name key; every frame counts the value. With no
+    # frame open (a top-level enum — serde opens no struct frame for one) nothing is
+    # keyed or counted; the value is written straight into the buffer.
+    def _pre_value(self):
+        auto top = len(self.frame_kind) - 1
+        if top >= 0:
+            if self.frame_kind[top] == 0:
+                auto kb = bytes(self.pending_key)
+                _put_text_header(self.buf, len(kb), True)
+                _put_payload(self.buf, kb)
+            self.frame_count[top] = self.frame_count[top] + 1
+
+    # Open a container: emit its key (if inside a struct), reserve a placeholder
+    # header byte, and push the frame.
+    def _begin(self, int64 kind):
+        self._pre_value()
+        self.frame_off.append(len(self.buf))
+        self.buf.append(0)
+        self.frame_count.append(0)
+        self.frame_kind.append(kind)
+
+    def begin_struct(self):
+        self._begin(0)
+
+    def begin_seq(self):
+        self._begin(1)
+
+    def begin_map(self):
+        self._begin(2)
 
     def emit_int(self, int64 v):
-        self._emit(_integer(v))
+        self._pre_value()
+        _put_integer(self.buf, v)
 
     def emit_uint(self, uint64 v):
-        self._emit(_unsigned(v))
+        self._pre_value()
+        _put_unsigned(self.buf, v)
 
     def emit_float(self, float64 v):
-        self._emit(_float(v, False))
+        self._pre_value()
+        _put_float(self.buf, v, False)
 
     def emit_str(self, str v):
+        self._pre_value()
         auto payload = bytes(v)
-        self._emit(_text_header(len(payload), True) + payload)
+        _put_text_header(self.buf, len(payload), True)
+        _put_payload(self.buf, payload)
 
     def emit_bool(self, bool v):
+        self._pre_value()
         if v:
-            self._emit(bytes([0xc3]))
+            self.buf.append(0xc3)
         else:
-            self._emit(bytes([0xc2]))
+            self.buf.append(0xc2)
 
     def emit_bytes(self, bytes v):
-        self._emit(_length_header(len(v), 0, -1, 0xc4, 0xc5, 0xc6) + v)
+        self._pre_value()
+        _put_length_header(self.buf, len(v), 0, -1, 0xc4, 0xc5, 0xc6)
+        _put_payload(self.buf, v)
 
     # `Optional` None encodes as the MessagePack nil byte; a `Some` emits its inner
     # value directly (serde calls the matching `emit_*`).
     def emit_nil(self):
-        self._emit(bytes([0xc0]))
+        self._pre_value()
+        self.buf.append(0xc0)
 
     # An enum variant tag encodes as its name (a MessagePack string); any payload
     # values follow via the matching `emit_*`.
     def emit_variant(self, str name):
+        self._pre_value()
         auto payload = bytes(name)
-        self._emit(_text_header(len(payload), True) + payload)
+        _put_text_header(self.buf, len(payload), True)
+        _put_payload(self.buf, payload)
 
-    # Pop the current frame, prepend its `header`, and attach the finished bytes to
-    # the parent (keyed by this frame's field name) or to `result` at the top level.
-    def _finish(self, bytes header, int64 entries):
-        auto body = self.frames.pop()
-        auto fkey = self.frame_keys.pop()
-        auto _c = self.counts.pop()
-        auto _ki = self.kinds.pop()
-        bytes framebytes = header
-        if len(body) > 0:
-            framebytes = header + _join_bytes(body, 0, len(body))
-        if len(self.frames) == 0:
-            self.result = framebytes
+    # Close a container: back-patch the reserved placeholder byte. `fix_tag + n` is
+    # the fixmap / fixarray tag for n <= 15 (patched in place); otherwise splice a
+    # 3- or 5-byte `tag16` / `tag32` header in where the placeholder sits.
+    def _end(self, int64 n, int64 fix_tag, int64 tag16, int64 tag32):
+        auto off = self.frame_off.pop()
+        auto _c = self.frame_count.pop()
+        auto _k = self.frame_kind.pop()
+        if n <= 15:
+            self.buf[off] = fix_tag + n
         else:
-            auto parent = len(self.frames) - 1
-            auto kb = bytes(fkey)
-            self.frames[parent].append(_text_header(len(kb), True) + kb)
-            self.frames[parent].append(framebytes)
-            self.counts[parent] = self.counts[parent] + 1
+            list[int64] hdr = []
+            _put_length_header(hdr, n, fix_tag, 15, -1, tag16, tag32)
+            list[int64] spliced = self.buf[0:off]
+            for h in hdr:
+                spliced.append(h)
+            auto total = len(self.buf)
+            for i in range(off + 1, total):
+                spliced.append(self.buf[i])
+            self.buf = spliced
 
     def end_struct(self):
-        auto n = self.counts[len(self.counts) - 1]
-        self._finish(_length_header(n, 0x80, 15, -1, 0xde, 0xdf), n)
+        self._end(self.frame_count[len(self.frame_count) - 1], 0x80, 0xde, 0xdf)
 
     def end_seq(self):
-        auto n = self.counts[len(self.counts) - 1]
-        self._finish(_length_header(n, 0x90, 15, -1, 0xdc, 0xdd), n)
+        self._end(self.frame_count[len(self.frame_count) - 1], 0x90, 0xdc, 0xdd)
 
     def end_map(self):
-        auto pairs = self.counts[len(self.counts) - 1] // 2
-        self._finish(_length_header(pairs, 0x80, 15, -1, 0xde, 0xdf), pairs)
+        self._end(self.frame_count[len(self.frame_count) - 1] // 2, 0x80, 0xde, 0xdf)
 
 # Serialize any struct `T` to MessagePack bytes (a map of field -> value) through
 # the serde driver. Example: `auto wire = msgpack.pack(record)`.
 def pack[T](T value) -> bytes:
     auto s = MsgpackSerializer()
     serde.serialize(value, s)
-    return s.result
+    return bytes(s.buf)
 
 # A `serde.Deserializer` backend that serves decoded map entries positionally, in
 # field-declaration order (the order `pack` writes them). It decodes the wire via
