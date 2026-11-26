@@ -182,8 +182,10 @@ Decisions / deviations:
   struct's entries in a frame stack and backfills the map header at `end_struct`.
 - `unpack` takes an explicit type (`unpack[Rec](data)`): serde's deserialize target
   type cannot be inferred from the bytes.
-- **Scope this release** (serde's current surface): `int64` / `str` / `bool` fields
-  and nested structs on encode; flat `int64` / `str` / `bool` structs on decode.
+- **Scope this release** (serde's current surface): `int64` / `float64` / `str` /
+  `bool` / `bytes` fields and nested structs on encode; flat `int64` / `float64` /
+  `str` / `bool` / `bytes` structs on decode (`float64` as binary64, `bytes` as a
+  bin header).
   Wider field types (float, the integer-width tower, bytes, lists, maps, `Optional`,
   enums) and a direct-to-struct (DOM-free) decode follow serde's breadth work
   (zaplang-io/zap#1561 and the serde breadth follow-up). The `Value` DOM codec
