@@ -2,6 +2,9 @@
 
 ## 0.1.0 (Unreleased)
 
+- Extended the typed `pack[T]` / `unpack[T]` serde codec to `float64` and `bytes`
+  struct fields (binary64 floats, `bin` payloads), matching the serde breadth in
+  zaplang-io/zap#1574.
 - Added typed `pack[T]` / `unpack[T]` built on Zap's bundled `serde` foundation
   (zaplang-io/zap#1552): a struct (de)serializes with no per-type encoder, byte-
   identical to and interoperable with the `Value` DOM codec. Scalar `int64` /

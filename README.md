@@ -179,6 +179,6 @@ def main():
     assert back.name == "widget"
 ```
 
-This release supports `int64` / `str` / `bool` fields and nested structs on
-encode, and flat `int64` / `str` / `bool` structs on decode; wider field types and
+This release supports `int64` / `float64` / `str` / `bool` / `bytes` fields and
+nested structs on encode, and flat scalar structs on decode; wider field types and
 a DOM-free decode track the serde breadth work. See [DECISIONS.md](DECISIONS.md).

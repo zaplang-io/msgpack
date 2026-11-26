@@ -66,3 +66,26 @@ def test_nested_struct_encodes_as_a_nested_map():
         ])),
     ])
     _ok(pack(o) == packb(dom), "nested struct packs as a nested map, byte-identical to the DOM")
+
+struct SerdeMeasure:
+    int64 id
+    float64 score
+    bytes blob
+
+@test
+def test_float_and_bytes_round_trip():
+    auto r = SerdeMeasure(1, 2.5, bytes([1, 2, 255]))
+    auto r2 = unpack[SerdeMeasure](pack(r))
+    _ok(r2.id == 1, "id")
+    _ok(r2.score == 2.5, "float64 round-trip")
+    _ok(r2.blob == bytes([1, 2, 255]), "raw bytes round-trip")
+
+@test
+def test_float_and_bytes_match_the_dom():
+    auto r = SerdeMeasure(1, 2.5, bytes([1, 2, 255]))
+    auto dom = Value.Map([
+        (Value.Str("id"), Value.Int(1)),
+        (Value.Str("score"), Value.Float(2.5)),
+        (Value.Str("blob"), Value.Bin(bytes([1, 2, 255]))),
+    ])
+    _ok(pack(r) == packb(dom), "float64 + bytes pack equals the hand-built DOM")

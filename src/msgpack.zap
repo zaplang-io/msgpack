@@ -815,10 +815,11 @@ struct Unpacker:
 # `serde.Serializer` / `serde.Deserializer` backend interfaces and reuses serde's
 # generic drivers. A struct encodes as a MessagePack **map** of field name ->
 # value, byte-conformant with the spec and interoperable with the `Value` DOM
-# codec above. This release follows serde's current surface: `int64` / `str` /
-# `bool` fields and nested structs on encode; flat `int64` / `str` / `bool`
-# structs on decode (serde's nested/enum/collection decode is a later addition,
-# tracked in zaplang-io/zap#1561 and the serde breadth follow-up).
+# codec above. This release follows serde's current surface: `int64` / `float64` /
+# `str` / `bool` / `bytes` fields and nested structs on encode; flat `int64` /
+# `float64` / `str` / `bool` / `bytes` structs on decode (serde's nested/enum/
+# collection decode is a later addition, tracked in zaplang-io/zap#1561 and the
+# serde breadth follow-up). `float64` encodes as binary64; `bytes` as a bin header.
 
 # A `serde.Serializer` backend that writes MessagePack map bytes. Because serde's
 # `begin_struct` carries no field count (a map16/fixmap header needs the count up
@@ -850,6 +851,9 @@ struct MsgpackSerializer:
     def emit_int(self, int64 v):
         self._entry(_integer(v))
 
+    def emit_float(self, float64 v):
+        self._entry(_float(v, False))
+
     def emit_str(self, str v):
         auto payload = bytes(v)
         self._entry(_text_header(len(payload), True) + payload)
@@ -859,6 +863,9 @@ struct MsgpackSerializer:
             self._entry(bytes([0xc3]))
         else:
             self._entry(bytes([0xc2]))
+
+    def emit_bytes(self, bytes v):
+        self._entry(_length_header(len(v), 0, -1, 0xc4, 0xc5, 0xc6) + v)
 
     def end_struct(self):
         auto top = len(self.frames) - 1
@@ -910,6 +917,13 @@ struct MsgpackDeserializer:
             case _:
                 raise FormatError("msgpack.unpack: expected an integer for field '" + field + "'")
 
+    def read_float(self, str field) -> float64:
+        match self._next():
+            case Value.Float(x):
+                return x
+            case _:
+                raise FormatError("msgpack.unpack: expected a float for field '" + field + "'")
+
     def read_str(self, str field) -> str:
         match self._next():
             case Value.Str(x):
@@ -924,10 +938,18 @@ struct MsgpackDeserializer:
             case _:
                 raise FormatError("msgpack.unpack: expected a boolean for field '" + field + "'")
 
+    def read_bytes(self, str field) -> bytes:
+        match self._next():
+            case Value.Bin(b):
+                return b
+            case _:
+                raise FormatError("msgpack.unpack: expected binary for field '" + field + "'")
+
     def end_struct(self):
         pass
 
-# Decode MessagePack bytes into a flat struct `T` (int64 / str / bool fields).
+# Decode MessagePack bytes into a flat struct `T` (int64 / float64 / str / bool /
+# bytes fields).
 # Both type arguments are explicit, as serde requires: `msgpack.unpack[Rec](wire)`.
 def unpack[T](bytes data) -> T:
     list[(Value, Value)] pairs = []
