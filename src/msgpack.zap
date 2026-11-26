@@ -891,16 +891,13 @@ struct MsgpackSerializer:
     # Pop the current frame, prepend its `header`, and attach the finished bytes to
     # the parent (keyed by this frame's field name) or to `result` at the top level.
     def _finish(self, bytes header, int64 entries):
-        auto top = len(self.frames) - 1
-        auto body = self.frames[top]
+        auto body = self.frames.pop()
+        auto fkey = self.frame_keys.pop()
+        auto _c = self.counts.pop()
+        auto _ki = self.kinds.pop()
         bytes framebytes = header
         if len(body) > 0:
             framebytes = header + _join_bytes(body, 0, len(body))
-        auto fkey = self.frame_keys[top]
-        self.frames = self.frames[0:top]
-        self.counts = self.counts[0:top]
-        self.frame_keys = self.frame_keys[0:top]
-        self.kinds = self.kinds[0:top]
         if len(self.frames) == 0:
             self.result = framebytes
         else:
