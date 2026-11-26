@@ -2,6 +2,10 @@
 
 ## 0.1.0 (Unreleased)
 
+- Serializer encode perf (#32): `MsgpackSerializer._finish` now pops the frame
+  stack in O(1) instead of re-slicing all four stack lists on every `end_*`. On a
+  {int64; list×20; dict×5} payload this takes typed encode from ~8-10% slower than
+  the hand-rolled DOM path to ~3% (near parity). No behavior change.
 - Reworked the typed serde `unpack[T]` decoder (#30) to stream directly from the
   wire into the struct (a `_Decoder` cursor + context stack; array/map headers read
   directly, scalars decoded natively), with no intermediate `Value` DOM. On a
