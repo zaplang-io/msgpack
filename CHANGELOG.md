@@ -2,6 +2,10 @@
 
 ## 0.1.0 (Unreleased)
 
+- Added typed `pack[T]` / `unpack[T]` built on Zap's bundled `serde` foundation
+  (zaplang-io/zap#1552): a struct (de)serializes with no per-type encoder, byte-
+  identical to and interoperable with the `Value` DOM codec. Scalar `int64` /
+  `str` / `bool` fields and nested-struct encode; flat scalar decode.
 - Added the pure-Zap MessagePack codec with `packb`, `unpackb`, and the recursive
   `Value` model. Map entries retain input order and duplicates.
 - Added `Packer` and feed-based `Unpacker` for incremental streams with a

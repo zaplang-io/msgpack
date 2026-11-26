@@ -160,3 +160,33 @@ format.
 | `file_like`, `read_size` | The source owns reads and supplies bytes with `Unpacker.feed`. |
 
 [msgpack-python options](https://msgpack-python.readthedocs.io/en/latest/api.html), [msgpack-python legacy headers](https://github.com/msgpack/msgpack-python/blob/main/msgpack/fallback.py)
+
+## Typed struct codec over serde (issue #24, tracks zaplang-io/zap#1552)
+
+`pack[T](value) -> bytes` / `unpack[T](bytes) -> T` serialize an arbitrary struct
+through Zap's bundled `serde` foundation (zaplang-io/zap#1570) instead of a
+hand-written per-type encoder. A struct maps to a MessagePack **map** of field
+name → value in field-declaration order — byte-identical to the equivalent
+`Value.Map(...)` + `packb` (tested in `tests/serde_test.zap`), so the typed path
+and the `Value` DOM codec interoperate in both directions.
+
+msgpack is a **pure library** here: it implements the `serde.Serializer` /
+`serde.Deserializer` backend interfaces and reuses serde's generic, fully
+monomorphized drivers — no per-codec compiler support (the point of
+zaplang-io/zap#1248).
+
+Decisions / deviations:
+- **Struct → map**, not array: follows msgpack-python's dict encoding and keeps
+  field names on the wire; keys are written in declaration order.
+- `serde.begin_struct` carries no field count, so `MsgpackSerializer` buffers each
+  struct's entries in a frame stack and backfills the map header at `end_struct`.
+- `unpack` takes an explicit type (`unpack[Rec](data)`): serde's deserialize target
+  type cannot be inferred from the bytes.
+- **Scope this release** (serde's current surface): `int64` / `str` / `bool` fields
+  and nested structs on encode; flat `int64` / `str` / `bool` structs on decode.
+  Wider field types (float, the integer-width tower, bytes, lists, maps, `Optional`,
+  enums) and a direct-to-struct (DOM-free) decode follow serde's breadth work
+  (zaplang-io/zap#1561 and the serde breadth follow-up). The `Value` DOM codec
+  remains the path for those today.
+- **Requires** a Zap toolchain that bundles `serde` (zaplang-io/zap#1570); this is
+  gated on that landing in the compiler CI uses.
