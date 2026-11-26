@@ -194,3 +194,15 @@ Decisions / deviations:
   remains the path for those today.
 - **Requires** a Zap toolchain that bundles `serde` (zaplang-io/zap#1570); this is
   gated on that landing in the compiler CI uses.
+
+## Streaming serde decode (issue #30)
+
+`unpack[T]` originally reused `unpackb` (building the whole `Value` DOM) and then
+drove serde over it, which was correct but slower than the hand-rolled DOM path on
+collections (the DOM was built *and* re-walked). `MsgpackDeserializer` now decodes
+**directly from the wire**: it holds a `_Decoder` cursor and a context stack
+(struct / sequence / map), reads array and map **headers** without materializing a
+body, and reads scalars natively (tag + payload straight to the Zap value, no
+`Value` leaf). In a struct context each read first skips the field key; sequence
+and map reads are positional. This makes typed decode match/beat the `Value` DOM
+codec; the `Value` DOM path (`unpackb`) is unchanged for untyped use.
